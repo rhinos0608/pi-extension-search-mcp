@@ -14,7 +14,6 @@ Use this extension when current external evidence or repository context would im
 - `semantic_crawl`: retrieve query-relevant chunks from one URL or a discovered source corpus.
 - `research_sources`: search academic, Wikipedia, Hacker News, Stack Overflow, and public-data sources.
 - `github`: inspect repositories, files, trees, code search, trending repos, and semantic code search.
-- `reach_status`: inspect channel health and active backends before login-backed platform work.
 - `social`: search/read Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram.
 - `video`: search/read YouTube and Bilibili metadata/subtitles.
 - `feeds`: read RSS/Atom feeds.
@@ -22,14 +21,14 @@ Use this extension when current external evidence or repository context would im
 ## Preferred workflow
 
 1. Start with `web_search` or `research_sources` for broad discovery.
-2. Use `social` for platform-specific public discussion; run `reach_status` first for login-backed platforms.
+2. Use `social` for platform-specific public discussion; user can run `/reach-status social` first for login-backed platforms.
 3. Use `browse`, `semantic_crawl`, `video`, or `feeds` for source-specific retrieval.
 4. Use `github` for code facts instead of relying on web snippets.
 5. Report uncertainty when native search returns sparse results.
 
 ## CLI backend
 
-The extension routes through its local CLI backend by default. New family tools (`reach_status`, `social`, `video`, `feeds`) require this default native-cli backend. Useful checks:
+The extension routes through its local CLI backend by default. New family tools (`social`, `video`, `feeds`) require this default native-cli backend. Status/setup are user slash commands (`/reach-status`, `/reach-setup`), not agent tools. It also reuses `/Users/rhinesharar/search-mcp/config.json` by mapping known keys into env vars; never print mapped secret values. Useful checks:
 
 ```bash
 npm run cli -- status

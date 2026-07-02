@@ -3,8 +3,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { BackendCallResult } from './backend.js';
+import { callSetupTool } from './bootstrap.js';
 
-export type ReachToolName = 'reach_status' | 'social' | 'video' | 'feeds';
+export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds';
 
 interface ReachToolOptions {
   signal?: AbortSignal;
@@ -60,6 +61,8 @@ export async function callReachTool(
   switch (name as ReachToolName) {
     case 'reach_status':
       return reachStatus(args, options);
+    case 'reach_setup':
+      return callSetupTool(args, options);
     case 'social':
       return social(args, options);
     case 'video':
@@ -591,6 +594,12 @@ function externalEnvironment(command: string, env: Record<string, string | undef
   const allowed = [
     'PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
     'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
+    'GITHUB_TOKEN', 'GH_TOKEN', 'BRAVE_API_KEY', 'EXA_API_KEY', 'TAVILY_API_KEY',
+    'REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT', 'YOUTUBE_API_KEY',
+    'SEARXNG_BASE_URL', 'NITTER_BASE_URL', 'LISTENNOTES_API_KEY', 'PRODUCTHUNT_API_TOKEN',
+    'PATENTSVIEW_API_KEY', 'CRAWL4AI_BASE_URL', 'CRAWL4AI_API_TOKEN',
+    'DEEP_RESEARCH_BASE_URL', 'DEEP_RESEARCH_WORKER_BASE_URL', 'DEEP_RESEARCH_API_TOKEN',
+    'DEEP_RESEARCH_MODEL', 'DEEP_RESEARCH_WORKER_MODEL',
     ...(command === 'twitter' ? ['TWITTER_AUTH_TOKEN', 'TWITTER_CT0'] : []),
     ...(command === 'opencli' ? ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN'] : []),
   ];

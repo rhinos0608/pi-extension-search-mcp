@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { callNativeTool } from './native-tools.js';
 import { DEFAULT_SEARCH_MCP_COMMAND, buildServerParameters } from './mcp-client.js';
 import type { BackendCallResult } from './backend.js';
+import { loadedConfigSummary, loadSearchMcpEnvironment } from './local-config.js';
 
 interface CliResult {
   ok: boolean;
@@ -15,7 +16,7 @@ interface CliResult {
 
 if (isMainModule()) {
   try {
-    const result = await runCommand(process.argv.slice(2), process.env);
+    const result = await runCommand(process.argv.slice(2), loadSearchMcpEnvironment(process.env));
     writeResult(result);
     process.exitCode = result.ok ? 0 : 1;
   } catch (error) {
@@ -70,6 +71,7 @@ function configResult(env: Record<string, string | undefined>): CliResult {
       searchMcpCommand: env.SEARCH_MCP_COMMAND?.trim() || DEFAULT_SEARCH_MCP_COMMAND,
       searchMcpArgsJson: env.SEARCH_MCP_ARGS_JSON ?? '[]',
       searchMcpCwd: env.SEARCH_MCP_CWD ?? null,
+      localConfig: loadedConfigSummary(env),
     },
   };
 }

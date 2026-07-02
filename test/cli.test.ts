@@ -16,13 +16,18 @@ test('runCommand status reports native CLI backend configuration', async () => {
 });
 
 test('runCommand config reports env-facing settings', async () => {
-  assert.deepEqual(await runCommand(['config'], { SEARCH_MCP_CWD: '/tmp/search-mcp' }), {
+  assert.deepEqual(await runCommand(['config'], { SEARCH_MCP_CWD: '/tmp/search-mcp', SEARCH_MCP_CONFIG_PATH: '/tmp/missing-pi-search-config.json' }), {
     ok: true,
     data: {
       searchBackend: 'native-cli',
       searchMcpCommand: 'search-mcp',
       searchMcpArgsJson: '[]',
       searchMcpCwd: '/tmp/search-mcp',
+      localConfig: {
+        path: '/tmp/missing-pi-search-config.json',
+        loaded: false,
+        mappedKeys: [],
+      },
     },
   });
 });
@@ -65,4 +70,19 @@ test('runCommand supports reach_status family', async () => {
 
   assert.equal(result.ok, true);
   assert.match(JSON.stringify(result.data), /native-rss-atom/);
+});
+
+test('runCommand supports reach_setup plan', async () => {
+  const result = await runCommand(['call', 'reach_setup', '{"action":"plan"}'], {});
+
+  assert.equal(result.ok, true);
+  assert.match(JSON.stringify(result.data), /OpenCLI/);
+  assert.match(JSON.stringify(result.data), /twitter/);
+});
+
+test('runCommand blocks setup install without explicit env allow', async () => {
+  const result = await runCommand(['call', 'reach_setup', '{"action":"install_all"}'], {});
+
+  assert.equal(result.ok, true);
+  assert.match(JSON.stringify(result.data), /PI_SEARCH_ALLOW_INSTALL=1/);
 });

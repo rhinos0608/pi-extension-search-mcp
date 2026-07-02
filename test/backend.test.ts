@@ -21,12 +21,16 @@ test('buildCliEnvironment forwards reach backend auth and override allowlist', (
     TWITTER_BACKEND: 'OpenCLI',
     PI_SEARCH_REDDIT_BACKEND: 'rdt',
     HTTPS_PROXY: 'http://proxy.example',
+    EXA_API_KEY: 'exa',
+    SEARCH_MCP_CONFIG_PATH: '/tmp/config.json',
     DATABASE_URL: 'secret',
   }), {
     PATH: '/usr/bin',
     HTTPS_PROXY: 'http://proxy.example',
     TWITTER_AUTH_TOKEN: 'token',
     TWITTER_CT0: 'ct0',
+    EXA_API_KEY: 'exa',
+    SEARCH_MCP_CONFIG_PATH: '/tmp/config.json',
     TWITTER_BACKEND: 'OpenCLI',
     PI_SEARCH_REDDIT_BACKEND: 'rdt',
   });

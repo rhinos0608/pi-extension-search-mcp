@@ -56,3 +56,9 @@ test('video external wrappers reject non-http URL schemes', async () => {
     /Disallowed URL scheme/,
   );
 });
+
+test('reach_setup install actions are blocked by default', async () => {
+  const result = await callNativeTool('reach_setup', { action: 'install_core' });
+
+  assert.match(JSON.stringify(result.details), /Package installation is disabled/);
+});

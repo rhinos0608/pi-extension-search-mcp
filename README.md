@@ -11,7 +11,6 @@ Public Pi tool names stay stable:
 - `browse` — native URL fetch/readable text extraction
 - `research_sources` — native academic/community/public-source search
 - `github` — native GitHub repository, file, tree, search, trending, and code search actions
-- `reach_status` — channel/backend health report with active backend selection
 - `social` — Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram read/search family
 - `video` — YouTube and Bilibili search/metadata/subtitle family
 - `feeds` — native RSS/Atom feed reader
@@ -32,7 +31,6 @@ The extension routes tool execution through the local CLI by default.
 npm run cli -- status
 npm run cli -- config
 npm run cli -- call browse '{"url":"https://example.com"}'
-npm run cli -- call reach_status '{"family":"social"}'
 npm run cli -- call social '{"platform":"v2ex","action":"hot","limit":5}'
 npm run cli -- call feeds '{"url":"https://example.com/feed.xml"}'
 ```
@@ -55,11 +53,24 @@ CLI output is always JSON:
 }
 ```
 
+## Slash commands
+
+User-facing setup/status is exposed as Pi slash commands, not LLM tools:
+
+- `/reach-status [family]` — inspect channels/backends and active backend, e.g. `/reach-status social`
+- `/reach-setup [status|plan|install_core|install_all|install_channels channels]` — show setup plan or explicitly run gated setup
+
+Install actions require `PI_SEARCH_ALLOW_INSTALL=1`; logged-in platforms still require user browser login, cookie export, QR scan, or API key entry.
+
 ## Configuration
 
 Default backend is native CLI. Set `SEARCH_BACKEND=mcp` to use the legacy MCP stdio adapter.
 
-Agent-Reach-inspired family routing uses ordered backends per platform. Native zero-config channels run directly; login-backed platforms probe known CLIs and report `active_backend` through `reach_status`. New family tools require the default `native-cli` backend; legacy `SEARCH_BACKEND=mcp` only supports the original search-mcp tools.
+For this local setup, the extension automatically reads `/Users/rhinesharar/search-mcp/config.json` and maps known values into runtime environment variables (`GITHUB_TOKEN`, `EXA_API_KEY`, `BRAVE_API_KEY`, `TAVILY_API_KEY`, `CRAWL4AI_*`, `DEEP_RESEARCH_*`, and related service keys). Existing environment variables win. Override path with `SEARCH_MCP_CONFIG_PATH`.
+
+Agent-Reach-inspired family routing uses ordered backends per platform. Native zero-config channels run directly; login-backed platforms probe known CLIs and report `active_backend` through `/reach-status`. New family tools require the default `native-cli` backend; legacy `SEARCH_BACKEND=mcp` only supports the original search-mcp tools.
+
+On first extension startup, a check-only bootstrap runs once and records status in `~/.pi-extension-search/bootstrap.json`. It does not install packages, read cookies, open browsers, or log in. To opt into startup installation, set `PI_SEARCH_BOOTSTRAP=install_core` or `PI_SEARCH_BOOTSTRAP=install_all`; install actions require `PI_SEARCH_ALLOW_INSTALL=1`.
 
 Optional MCP fallback environment variables:
 
@@ -68,6 +79,9 @@ Optional MCP fallback environment variables:
 - `SEARCH_MCP_ARGS_JSON` — JSON string array of arguments, default `[]`
 - `SEARCH_MCP_CWD` — working directory for the spawned MCP server
 - `SEARCH_MCP_FORWARD_ENV_JSON` — JSON string array of extra environment variable names to forward to MCP fallback
+- `SEARCH_MCP_CONFIG_PATH` — optional config path; default `/Users/rhinesharar/search-mcp/config.json`
+- `PI_SEARCH_BOOTSTRAP` — first-start bootstrap mode: `check` default, `off`, `safe`, `install_core`, or `install_all`
+- `PI_SEARCH_ALLOW_INSTALL` — set to `1` to allow explicit `/reach-setup` install actions
 
 The MCP fallback forwards only an allowlisted environment to avoid leaking parent process secrets. External family backends also receive a small allowlist only: PATH/HOME/temp locale/proxy vars plus known platform auth vars.
 

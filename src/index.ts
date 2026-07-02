@@ -1,9 +1,11 @@
-import type { AgentToolResult, ExtensionAPI } from '@earendil-works/pi-coding-agent';
+import type { AgentToolResult, ExtensionAPI, ExtensionCommandContext } from '@earendil-works/pi-coding-agent';
 import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { createSearchBackend, resultToText, type SearchBackend } from './backend.js';
 import { normalizeProviderPayload } from './payload.js';
 import { registerGitHubTool } from './github.js';
+import { callSetupTool, ensureFirstStartBootstrap } from './bootstrap.js';
+import { loadSearchMcpEnvironment } from './local-config.js';
 
 const searchCategoryNames = [
   'company',
@@ -38,7 +40,9 @@ const socialPlatforms = ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook',
 const videoPlatforms = ['youtube', 'bilibili'] as const;
 
 export default function (pi: ExtensionAPI): void {
-  const client = createSearchBackend(process.env);
+  const env = loadSearchMcpEnvironment(process.env);
+  const client = createSearchBackend(env);
+  void ensureFirstStartBootstrap(env);
 
   pi.on('session_shutdown', () => {
     void client.close();
@@ -49,6 +53,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   registerGitHubTool(pi, client);
+  registerExpansionCommands(pi, env);
   registerExpansionTools(pi, client);
 
   pi.registerTool({
@@ -155,23 +160,47 @@ async function callSearchMcpTool(
   };
 }
 
-function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend): void {
-  pi.registerTool({
-    name: 'reach_status',
-    label: 'Reach Status',
-    description: 'Inspect native and external internet capability channels, ordered backends, and active backend health.',
-    promptSnippet: 'Check which internet capability channels and external backends are available.',
-    promptGuidelines: ['Run reach_status before using login-backed social/video platforms or when a backend fails.'],
-    parameters: Type.Object({
-      family: Type.Optional(StringEnum(reachFamilies)),
-    }),
-    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'reach_status', {
-        ...(params.family ? { family: params.family } : {}),
-      }, signal, 60_000);
+function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string | undefined>): void {
+  pi.registerCommand('reach-status', {
+    description: 'Inspect search extension channel/backend health. Usage: /reach-status [social|video|feeds|web|dev|research]',
+    getArgumentCompletions: (prefix) => reachFamilies.filter((family) => family.startsWith(prefix)).map((family) => ({ value: family, label: family })),
+    handler: async (args, ctx) => {
+      const family = args.trim();
+      const result = await callSetupOrStatus('reach_status', family ? { family } : {}, env, ctx.signal);
+      await showCommandResult(ctx, 'Reach Status', resultToText(result));
     },
   });
 
+  pi.registerCommand('reach-setup', {
+    description: 'Show or run setup for external backends. Usage: /reach-setup [status|plan|install_core|install_all|install_channels channels]',
+    getArgumentCompletions: (prefix) => ['status', 'plan', 'install_core', 'install_all', 'install_channels']
+      .filter((action) => action.startsWith(prefix))
+      .map((action) => ({ value: action, label: action })),
+    handler: async (args, ctx) => {
+      const [action = 'status', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const params = { action, ...(rest.length ? { channels: rest.join(',') } : {}) };
+      const result = await callSetupTool(params, { env, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+      await showCommandResult(ctx, 'Reach Setup', resultToText(result));
+    },
+  });
+}
+
+async function callSetupOrStatus(name: string, args: Record<string, unknown>, env: Record<string, string | undefined>, signal: AbortSignal | undefined) {
+  const { callReachTool } = await import('./reach-tools.js');
+  const result = await callReachTool(name, args, { env, ...(signal ? { signal } : {}) });
+  if (!result) throw new Error(`Unsupported command backend: ${name}`);
+  return result;
+}
+
+async function showCommandResult(ctx: ExtensionCommandContext, title: string, text: string): Promise<void> {
+  if (ctx.hasUI) {
+    await ctx.ui.editor(title, text);
+    return;
+  }
+  ctx.ui.notify(`${title}: ${text.slice(0, 500)}`, 'info');
+}
+
+function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend): void {
   pi.registerTool({
     name: 'social',
     label: 'Social',
@@ -179,7 +208,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend): void {
     promptSnippet: 'Search/read Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram.',
     promptGuidelines: [
       'Use social for platform-specific public discussion research.',
-      'Run reach_status first for login-backed platforms; V2EX is zero-config native.',
+      'For login-backed platforms, tell users they can run /reach-status first; V2EX is zero-config native.',
       'Prefer read-only actions; do not post, like, comment, or mutate accounts.',
     ],
     parameters: Type.Object({
