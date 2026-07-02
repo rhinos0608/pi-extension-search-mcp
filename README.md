@@ -11,6 +11,10 @@ Public Pi tool names stay stable:
 - `browse` — native URL fetch/readable text extraction
 - `research_sources` — native academic/community/public-source search
 - `github` — native GitHub repository, file, tree, search, trending, and code search actions
+- `reach_status` — channel/backend health report with active backend selection
+- `social` — Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram read/search family
+- `video` — YouTube and Bilibili search/metadata/subtitle family
+- `feeds` — native RSS/Atom feed reader
 
 ## Local use
 
@@ -28,6 +32,9 @@ The extension routes tool execution through the local CLI by default.
 npm run cli -- status
 npm run cli -- config
 npm run cli -- call browse '{"url":"https://example.com"}'
+npm run cli -- call reach_status '{"family":"social"}'
+npm run cli -- call social '{"platform":"v2ex","action":"hot","limit":5}'
+npm run cli -- call feeds '{"url":"https://example.com/feed.xml"}'
 ```
 
 Installed package binary:
@@ -52,6 +59,8 @@ CLI output is always JSON:
 
 Default backend is native CLI. Set `SEARCH_BACKEND=mcp` to use the legacy MCP stdio adapter.
 
+Agent-Reach-inspired family routing uses ordered backends per platform. Native zero-config channels run directly; login-backed platforms probe known CLIs and report `active_backend` through `reach_status`. New family tools require the default `native-cli` backend; legacy `SEARCH_BACKEND=mcp` only supports the original search-mcp tools.
+
 Optional MCP fallback environment variables:
 
 - `SEARCH_BACKEND` — `native-cli` default; set `mcp` for legacy stdio backend
@@ -60,7 +69,13 @@ Optional MCP fallback environment variables:
 - `SEARCH_MCP_CWD` — working directory for the spawned MCP server
 - `SEARCH_MCP_FORWARD_ENV_JSON` — JSON string array of extra environment variable names to forward to MCP fallback
 
-The MCP fallback forwards only an allowlisted environment to avoid leaking parent process secrets.
+The MCP fallback forwards only an allowlisted environment to avoid leaking parent process secrets. External family backends also receive a small allowlist only: PATH/HOME/temp locale/proxy vars plus known platform auth vars.
+
+Per-platform backend override examples:
+
+- `TWITTER_BACKEND=OpenCLI`
+- `PI_SEARCH_REDDIT_BACKEND=rdt`
+- `BILIBILI_BACKEND=OpenCLI`
 
 ## Package contract
 

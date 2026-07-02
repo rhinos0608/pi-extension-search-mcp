@@ -59,3 +59,10 @@ test('runCommand supports public browse tool alias', async () => {
   assert.equal(result.error?.code, 'tool_error');
   assert.match(result.error?.message ?? '', /Disallowed URL scheme/);
 });
+
+test('runCommand supports reach_status family', async () => {
+  const result = await runCommand(['call', 'reach_status', '{"family":"feeds"}'], {});
+
+  assert.equal(result.ok, true);
+  assert.match(JSON.stringify(result.data), /native-rss-atom/);
+});

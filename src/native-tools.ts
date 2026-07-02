@@ -1,4 +1,5 @@
 import type { BackendCallResult } from './backend.js';
+import { callReachTool } from './reach-tools.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
 
@@ -20,6 +21,9 @@ export async function callNativeTool(
   args: Record<string, unknown>,
   options: NativeToolOptions = {},
 ): Promise<BackendCallResult> {
+  const reachResult = await callReachTool(name, args, options);
+  if (reachResult) return reachResult;
+
   switch (name as NativeToolName) {
     case 'web_search':
       return webSearch(args, options);

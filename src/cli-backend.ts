@@ -19,7 +19,7 @@ export class CliSearchBackend implements SearchBackend {
   ) {}
 
   async callTool(name: string, args: Record<string, unknown>, options: BackendCallOptions = {}): Promise<BackendCallResult> {
-    const envelope = await this.run(['call', name, JSON.stringify(args)], options.signal);
+    const envelope = await this.run(['call', name, JSON.stringify(args)], options.signal, options.timeout);
     if (!envelope.ok) throw new Error(envelope.error?.message ?? 'CLI backend failed');
     if (!envelope.data) throw new Error('CLI backend returned no data.');
     return envelope.data;
@@ -27,7 +27,7 @@ export class CliSearchBackend implements SearchBackend {
 
   async close(): Promise<void> {}
 
-  private run(args: string[], signal?: AbortSignal): Promise<CliEnvelope> {
+  private run(args: string[], signal?: AbortSignal, timeout?: number): Promise<CliEnvelope> {
     return new Promise((resolve, reject) => {
       const child = spawn(process.execPath, ['--import', 'tsx', this.cliPath, ...args], {
         env: buildCliEnvironment(this.env),
@@ -35,16 +35,35 @@ export class CliSearchBackend implements SearchBackend {
       });
       const stdout: Buffer[] = [];
       const stderr: Buffer[] = [];
+      let timedOut = false;
 
+      const cleanup = () => {
+        signal?.removeEventListener('abort', abort);
+        if (timer) clearTimeout(timer);
+      };
       const abort = () => child.kill('SIGTERM');
+      const timer = timeout
+        ? setTimeout(() => {
+          timedOut = true;
+          child.kill('SIGTERM');
+        }, timeout)
+        : undefined;
+
       signal?.addEventListener('abort', abort, { once: true });
       child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
       child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
-      child.on('error', reject);
+      child.on('error', (error) => {
+        cleanup();
+        reject(error);
+      });
       child.on('close', (code) => {
-        signal?.removeEventListener('abort', abort);
+        cleanup();
         const output = Buffer.concat(stdout).toString('utf8');
         const diagnostics = Buffer.concat(stderr).toString('utf8').trim();
+        if (timedOut) {
+          reject(new Error(`CLI backend timed out after ${timeout}ms${diagnostics ? `\n${diagnostics}` : ''}`));
+          return;
+        }
         let parsed: CliEnvelope;
         try {
           parsed = JSON.parse(output) as CliEnvelope;
@@ -62,16 +81,43 @@ export class CliSearchBackend implements SearchBackend {
   }
 }
 
-function buildCliEnvironment(env: Record<string, string | undefined>): Record<string, string> {
+export function buildCliEnvironment(env: Record<string, string | undefined>): Record<string, string> {
   const allowed = [
     'PATH',
     'HOME',
     'TMPDIR',
     'TEMP',
     'TMP',
+    'SHELL',
+    'LANG',
+    'LC_ALL',
+    'PYTHONIOENCODING',
     'NODE_OPTIONS',
     'GITHUB_TOKEN',
     'SEARCH_BACKEND',
+    'HTTP_PROXY',
+    'HTTPS_PROXY',
+    'ALL_PROXY',
+    'NO_PROXY',
+    'TWITTER_AUTH_TOKEN',
+    'TWITTER_CT0',
+    'OPENCLI_HOST',
+    'OPENCLI_PORT',
+    'OPENCLI_TOKEN',
+    'TWITTER_BACKEND',
+    'PI_SEARCH_TWITTER_BACKEND',
+    'REDDIT_BACKEND',
+    'PI_SEARCH_REDDIT_BACKEND',
+    'XIAOHONGSHU_BACKEND',
+    'PI_SEARCH_XIAOHONGSHU_BACKEND',
+    'FACEBOOK_BACKEND',
+    'PI_SEARCH_FACEBOOK_BACKEND',
+    'INSTAGRAM_BACKEND',
+    'PI_SEARCH_INSTAGRAM_BACKEND',
+    'YOUTUBE_BACKEND',
+    'PI_SEARCH_YOUTUBE_BACKEND',
+    'BILIBILI_BACKEND',
+    'PI_SEARCH_BILIBILI_BACKEND',
   ];
   return Object.fromEntries(
     allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),

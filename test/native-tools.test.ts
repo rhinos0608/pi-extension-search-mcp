@@ -22,3 +22,37 @@ test('native browse rejects non-http URL schemes', async () => {
     /Disallowed URL scheme/,
   );
 });
+
+test('reach_status reports native feed channel without network', async () => {
+  const result = await callNativeTool('reach_status', { family: 'feeds' });
+
+  assert.match(JSON.stringify(result.details), /native-rss-atom/);
+});
+
+test('social requires supported platform', async () => {
+  await assert.rejects(
+    () => callNativeTool('social', { platform: 'myspace', action: 'search', query: 'test' }),
+    /platform is required/,
+  );
+});
+
+test('feeds rejects non-http URL schemes', async () => {
+  await assert.rejects(
+    () => callNativeTool('feeds', { url: 'file:///tmp/feed.xml' }),
+    /Disallowed URL scheme/,
+  );
+});
+
+test('social external wrappers reject non-http URL schemes', async () => {
+  await assert.rejects(
+    () => callNativeTool('social', { platform: 'twitter', action: 'read', url: 'file:///tmp/tweet' }),
+    /Disallowed URL scheme/,
+  );
+});
+
+test('video external wrappers reject non-http URL schemes', async () => {
+  await assert.rejects(
+    () => callNativeTool('video', { platform: 'youtube', action: 'details', url: 'file:///tmp/video' }),
+    /Disallowed URL scheme/,
+  );
+});

@@ -33,6 +33,10 @@ const researchSources = [
   'wikidata',
 ] as const;
 
+const reachFamilies = ['social', 'video', 'feeds', 'web', 'dev', 'research'] as const;
+const socialPlatforms = ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook', 'instagram'] as const;
+const videoPlatforms = ['youtube', 'bilibili'] as const;
+
 export default function (pi: ExtensionAPI): void {
   const client = createSearchBackend(process.env);
 
@@ -45,6 +49,7 @@ export default function (pi: ExtensionAPI): void {
   });
 
   registerGitHubTool(pi, client);
+  registerExpansionTools(pi, client);
 
   pi.registerTool({
     name: 'web_search',
@@ -63,7 +68,7 @@ export default function (pi: ExtensionAPI): void {
         limit: params.limit ?? 8,
         resultFormat: 'collated',
         ...(params.category ? { category: params.category } : {}),
-      }, signal);
+      }, signal, 120_000);
     },
   });
 
@@ -104,7 +109,7 @@ export default function (pi: ExtensionAPI): void {
       maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Maximum characters to return, default 12000.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'agentic_browse', buildBrowseArgs(params), signal);
+      return callSearchMcpTool(client, 'agentic_browse', buildBrowseArgs(params), signal, 120_000);
     },
   });
 
@@ -127,7 +132,7 @@ export default function (pi: ExtensionAPI): void {
         source: params.source ?? 'all',
         limit: params.limit ?? 12,
         ...(params.yearFrom ? { yearFrom: params.yearFrom } : {}),
-      }, signal);
+      }, signal, 120_000);
     },
   });
 }
@@ -148,6 +153,89 @@ async function callSearchMcpTool(
     content: [{ type: 'text', text: resultToText(result) }],
     details: result,
   };
+}
+
+function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend): void {
+  pi.registerTool({
+    name: 'reach_status',
+    label: 'Reach Status',
+    description: 'Inspect native and external internet capability channels, ordered backends, and active backend health.',
+    promptSnippet: 'Check which internet capability channels and external backends are available.',
+    promptGuidelines: ['Run reach_status before using login-backed social/video platforms or when a backend fails.'],
+    parameters: Type.Object({
+      family: Type.Optional(StringEnum(reachFamilies)),
+    }),
+    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
+      return callSearchMcpTool(client, 'reach_status', {
+        ...(params.family ? { family: params.family } : {}),
+      }, signal, 60_000);
+    },
+  });
+
+  pi.registerTool({
+    name: 'social',
+    label: 'Social',
+    description: 'Read and search social/community platforms using native public APIs or ordered external backends.',
+    promptSnippet: 'Search/read Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram.',
+    promptGuidelines: [
+      'Use social for platform-specific public discussion research.',
+      'Run reach_status first for login-backed platforms; V2EX is zero-config native.',
+      'Prefer read-only actions; do not post, like, comment, or mutate accounts.',
+    ],
+    parameters: Type.Object({
+      platform: Type.Optional(StringEnum(socialPlatforms)),
+      action: Type.Optional(Type.String({ description: 'Platform action, e.g. search, read, user, user_posts, feed, hot, popular, subreddit, node, topic, replies, comments.' })),
+      query: Type.Optional(Type.String()),
+      url: Type.Optional(Type.String()),
+      id: Type.Optional(Type.String()),
+      user: Type.Optional(Type.String()),
+      username: Type.Optional(Type.String()),
+      subreddit: Type.Optional(Type.String()),
+      node: Type.Optional(Type.String()),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
+    }),
+    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
+      return callSearchMcpTool(client, 'social', params, signal, 180_000);
+    },
+  });
+
+  pi.registerTool({
+    name: 'video',
+    label: 'Video',
+    description: 'Search/read video platforms and extract metadata or subtitles through ordered backends.',
+    promptSnippet: 'Use YouTube or Bilibili backends for video metadata, search, and subtitles.',
+    promptGuidelines: [
+      'Use video for YouTube metadata/subtitles and Bilibili search/details/subtitles.',
+      'Do not use yt-dlp for Bilibili; bili-cli/OpenCLI backends are preferred.',
+    ],
+    parameters: Type.Object({
+      platform: Type.Optional(StringEnum(videoPlatforms)),
+      action: Type.Optional(Type.String({ description: 'search, details, transcript, hot, video, subtitle.' })),
+      query: Type.Optional(Type.String()),
+      url: Type.Optional(Type.String()),
+      id: Type.Optional(Type.String()),
+      language: Type.Optional(Type.String({ description: 'Subtitle language pattern for YouTube transcript, default en.*.' })),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })),
+    }),
+    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
+      return callSearchMcpTool(client, 'video', params, signal, 300_000);
+    },
+  });
+
+  pi.registerTool({
+    name: 'feeds',
+    label: 'Feeds',
+    description: 'Read RSS or Atom feeds and return recent entries.',
+    promptSnippet: 'Read RSS/Atom subscriptions and summarize recent entries.',
+    promptGuidelines: ['Use feeds for RSS/Atom URLs instead of generic browse.'],
+    parameters: Type.Object({
+      url: Type.String({ description: 'RSS or Atom feed URL.' }),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Maximum entries, default 20.' })),
+    }),
+    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
+      return callSearchMcpTool(client, 'feeds', params, signal, 120_000);
+    },
+  });
 }
 
 export function buildBrowseArgs(params: { url: string; maxChars?: number }): Record<string, unknown> {
