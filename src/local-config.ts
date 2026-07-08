@@ -1,6 +1,9 @@
 import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-export const DEFAULT_SEARCH_MCP_CONFIG_PATH = '/Users/rhinesharar/search-mcp/config.json';
+export const DEFAULT_SEARCH_MCP_CONFIG_PATH = '';
+export const DEFAULT_ENV_PATH = join(dirname(dirname(fileURLToPath(import.meta.url))), '.env');
 
 type JsonObject = Record<string, unknown>;
 
@@ -42,11 +45,13 @@ const mappings: Array<[string, string]> = [
 ];
 
 export function loadSearchMcpEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
-  const configPath = env.SEARCH_MCP_CONFIG_PATH?.trim() || DEFAULT_SEARCH_MCP_CONFIG_PATH;
+  const envFile = readEnvFile(env.PI_SEARCH_ENV_PATH ?? DEFAULT_ENV_PATH);
+  const base = { ...envFile, ...env };
+  const configPath = base.SEARCH_MCP_CONFIG_PATH?.trim() || DEFAULT_SEARCH_MCP_CONFIG_PATH;
   const config = readJsonConfig(configPath);
-  if (!config) return env;
+  if (!config) return base;
 
-  const merged: Record<string, string | undefined> = { ...env, SEARCH_MCP_CONFIG_PATH: configPath };
+  const merged: Record<string, string | undefined> = { ...base, SEARCH_MCP_CONFIG_PATH: configPath };
   for (const [path, key] of mappings) {
     if (merged[key]) continue;
     const value = valueAtPath(config, path);
@@ -56,7 +61,9 @@ export function loadSearchMcpEnvironment(env: Record<string, string | undefined>
 }
 
 export function loadedConfigSummary(env: Record<string, string | undefined>): { path: string; loaded: boolean; mappedKeys: string[] } {
-  const configPath = env.SEARCH_MCP_CONFIG_PATH?.trim() || DEFAULT_SEARCH_MCP_CONFIG_PATH;
+  const envFile = readEnvFile(env.PI_SEARCH_ENV_PATH ?? DEFAULT_ENV_PATH);
+  const base = { ...envFile, ...env };
+  const configPath = base.SEARCH_MCP_CONFIG_PATH?.trim() || DEFAULT_SEARCH_MCP_CONFIG_PATH;
   const config = readJsonConfig(configPath);
   if (!config) return { path: configPath, loaded: false, mappedKeys: [] };
   return {
@@ -66,8 +73,30 @@ export function loadedConfigSummary(env: Record<string, string | undefined>): { 
   };
 }
 
+function readEnvFile(path: string | undefined): Record<string, string> {
+  if (!path || !existsSync(path)) return {};
+  const parsed: Record<string, string> = {};
+  for (const rawLine of readFileSync(path, 'utf8').split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const match = /^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/.exec(line);
+    if (!match) continue;
+    const [, key, value] = match;
+    if (key && value !== undefined) parsed[key] = unquoteEnvValue(value);
+  }
+  return parsed;
+}
+
+function unquoteEnvValue(value: string): string {
+  const trimmed = value.trim();
+  if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+    return trimmed.slice(1, -1);
+  }
+  return trimmed;
+}
+
 function readJsonConfig(path: string): JsonObject | undefined {
-  if (!existsSync(path)) return undefined;
+  if (!path || !existsSync(path)) return undefined;
   try {
     const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
     if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return undefined;

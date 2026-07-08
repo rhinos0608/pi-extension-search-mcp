@@ -12,6 +12,10 @@ interface CliEnvelope {
   };
 }
 
+const TSX_LOADER_URL = import.meta.resolve('tsx');
+const MAX_OUTPUT_CHARS = 1_000_000;
+const SIGKILL_AFTER_MS = 5_000;
+
 export class CliSearchBackend implements SearchBackend {
   constructor(
     private readonly env: Record<string, string | undefined>,
@@ -29,37 +33,46 @@ export class CliSearchBackend implements SearchBackend {
 
   private run(args: string[], signal?: AbortSignal, timeout?: number): Promise<CliEnvelope> {
     return new Promise((resolve, reject) => {
-      const child = spawn(process.execPath, ['--import', 'tsx', this.cliPath, ...args], {
+      const child = spawn(process.execPath, ['--import', TSX_LOADER_URL, this.cliPath, ...args], {
         env: buildCliEnvironment(this.env),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
-      const stdout: Buffer[] = [];
-      const stderr: Buffer[] = [];
+      let stdout = '';
+      let stderr = '';
       let timedOut = false;
+      let killTimer: NodeJS.Timeout | undefined;
 
-      const cleanup = () => {
-        signal?.removeEventListener('abort', abort);
-        if (timer) clearTimeout(timer);
+      const terminate = () => {
+        child.kill('SIGTERM');
+        killTimer ??= setTimeout(() => child.kill('SIGKILL'), SIGKILL_AFTER_MS);
       };
-      const abort = () => child.kill('SIGTERM');
+      const cleanup = () => {
+        signal?.removeEventListener('abort', terminate);
+        if (timer) clearTimeout(timer);
+        if (killTimer) clearTimeout(killTimer);
+      };
       const timer = timeout
         ? setTimeout(() => {
           timedOut = true;
-          child.kill('SIGTERM');
+          terminate();
         }, timeout)
         : undefined;
 
-      signal?.addEventListener('abort', abort, { once: true });
-      child.stdout.on('data', (chunk: Buffer) => stdout.push(chunk));
-      child.stderr.on('data', (chunk: Buffer) => stderr.push(chunk));
+      signal?.addEventListener('abort', terminate, { once: true });
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout = (stdout + chunk.toString('utf8')).slice(-MAX_OUTPUT_CHARS);
+      });
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr = (stderr + chunk.toString('utf8')).slice(-MAX_OUTPUT_CHARS);
+      });
       child.on('error', (error) => {
         cleanup();
         reject(error);
       });
       child.on('close', (code) => {
         cleanup();
-        const output = Buffer.concat(stdout).toString('utf8');
-        const diagnostics = Buffer.concat(stderr).toString('utf8').trim();
+        const output = stdout;
+        const diagnostics = stderr.trim();
         if (timedOut) {
           reject(new Error(`CLI backend timed out after ${timeout}ms${diagnostics ? `\n${diagnostics}` : ''}`));
           return;
@@ -97,8 +110,6 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'SEARCH_BACKEND',
     'PI_SEARCH_BOOTSTRAP',
     'PI_SEARCH_ALLOW_INSTALL',
-    'PI_SEARCH_IMPORT_BROWSER_COOKIES',
-    'PI_SEARCH_BROWSER_COOKIE_BROWSERS',
     'HTTP_PROXY',
     'HTTPS_PROXY',
     'ALL_PROXY',
@@ -137,6 +148,8 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'SEARCH_LLM_BASE_URL',
     'OLLAMA_SEARCH_BASE_URL',
     'OLLAMA_SEARCH_API_KEY',
+    'SEARCH_OLLAMA_BASE_URL',
+    'SEARCH_OLLAMA_API_KEY',
     'BROWSER_EXECUTABLE_PATH',
     'BROWSER_PROXY_SERVER',
     'BROWSER_CDP_ENDPOINT',
@@ -156,6 +169,13 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'PI_SEARCH_YOUTUBE_BACKEND',
     'BILIBILI_BACKEND',
     'PI_SEARCH_BILIBILI_BACKEND',
+    'PI_SEARCH_BROWSER_AUTOMATION',
+    'PI_SEARCH_ENV_PATH',
+    'PI_SEARCH_AUTO_INSTALL',
+    'PI_SEARCH_AUTO_COOKIES',
+    'PI_SEARCH_COOKIE_BROWSER',
+    'PI_SEARCH_COOKIE_STALE_MS',
+    'PI_SEARCH_STATE_DIR',
   ];
   return Object.fromEntries(
     allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),

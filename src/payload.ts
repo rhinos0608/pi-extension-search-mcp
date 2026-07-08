@@ -1,13 +1,15 @@
 export function normalizeProviderPayload(payload: unknown): unknown {
-  if (!isRecord(payload) || !('instructions' in payload)) return payload;
+  return normalizeInstructionsFields(payload);
+}
 
-  const instructions = payload.instructions;
-  if (typeof instructions === 'string') return payload;
+function normalizeInstructionsFields(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(normalizeInstructionsFields);
+  if (!isRecord(value)) return value;
 
-  return {
-    ...payload,
-    instructions: stringifyInstructions(instructions),
-  };
+  return Object.fromEntries(Object.entries(value).map(([key, child]) => [
+    key,
+    key === 'instructions' ? stringifyInstructions(child) : normalizeInstructionsFields(child),
+  ]));
 }
 
 function stringifyInstructions(instructions: unknown): string {

@@ -1,10 +1,14 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
-import { spawn } from 'node:child_process';
+import { basename, dirname, join } from 'node:path';
 import type { BackendCallResult } from './backend.js';
+import { importCookiesFromCdp, loginViaCdp } from './cdp.js';
+import { importCookiesFromDefaultBrowser } from './cookie-jar.js';
+import { runSetupInstall } from './installer.js';
+import { loadedConfigSummary } from './local-config.js';
+import { liveAuthSnapshot, providerSummary, PROVIDER_DESCRIPTORS, findProvider } from './providers.js';
 
-export type SetupAction = 'status' | 'plan' | 'install_core' | 'install_all' | 'install_channels' | 'import_cookies';
+export type SetupAction = 'auto' | 'status' | 'plan' | 'install_core' | 'install_all' | 'install_channels' | 'import_cookies' | 'login';
 
 interface SetupOptions {
   signal?: AbortSignal;
@@ -12,186 +16,312 @@ interface SetupOptions {
 }
 
 interface BootstrapState {
-  version: 1;
+  version: number;
   ranAt: string;
   mode: string;
   status: 'ok' | 'warn' | 'error';
   message: string;
+  install?: unknown;
+  cookies?: unknown;
 }
 
-interface CommandResult {
-  code: number | null;
-  stdout: string;
-  stderr: string;
+interface CookieStatus {
+  provider: string;
+  path: string;
+  cookieCount: number;
+  domains: string[];
+  updatedAt: string;
 }
 
-const STATE_PATH = join(homedir(), '.pi-extension-search', 'bootstrap.json');
-const INSTALL_DOC_URL = 'https://raw.githubusercontent.com/Panniantong/agent-reach/main/docs/install.md';
-const OPENCLI_EXTENSION_URL = 'https://chromewebstore.google.com/detail/opencli/ildkmabpimmkaediidaifkhjpohdnifk';
+const BOOTSTRAP_STATE_VERSION = 3;
+const DEFAULT_STATE_DIR = join(homedir(), '.pi-extension-search');
+const DEFAULT_BOOTSTRAP_MESSAGE = 'First-start automation complete. Use /reach-setup status to view backend, auth, and cookie state.';
+
+const STATE_PATH = join(DEFAULT_STATE_DIR, 'bootstrap.json');
+export const AUTH_STATE_PATH = join(DEFAULT_STATE_DIR, 'auth-state.json');
+
+const KNOWN_CHANNELS = ['web', 'github', 'rss', 'v2ex', 'twitter', 'reddit', 'xiaohongshu', 'facebook', 'instagram', 'youtube', 'bilibili', 'research', 'xueqiu', 'linkedin', 'xiaoyuzhou'];
 
 const platformPlan = [
   { platform: 'web', ready: 'Read any webpage', unlock: '—', setup: 'No configuration required' },
   { platform: 'youtube', ready: 'Subtitle extraction + video search', unlock: '—', setup: 'Install yt-dlp; Node/Deno JS runtime recommended' },
   { platform: 'rss', ready: 'Read RSS/Atom', unlock: '—', setup: 'No configuration required' },
-  { platform: 'search', ready: 'Basic native search', unlock: 'Full semantic search', setup: 'Optional Exa/mcporter path from Agent-Reach' },
-  { platform: 'github', ready: 'Public repos + search', unlock: 'Private repos, Issues/PRs, forks', setup: 'Run gh auth login or provide GITHUB_TOKEN' },
-  { platform: 'twitter', ready: 'Read single tweet where backend supports it', unlock: 'Search, timelines, articles', setup: 'twitter-cli with TWITTER_AUTH_TOKEN/TWITTER_CT0 or OpenCLI + Chrome login' },
-  { platform: 'bilibili', ready: 'Search + video details via bili-cli', unlock: 'Subtitles via OpenCLI', setup: 'Install bili-cli; OpenCLI for subtitles' },
-  { platform: 'reddit', ready: '—', unlock: 'Search + posts/comments', setup: 'OpenCLI + Chrome login or rdt-cli + cookie; no zero-config path' },
-  { platform: 'facebook', ready: '—', unlock: 'Search, profiles, feed, groups', setup: 'OpenCLI desktop + Chrome login' },
-  { platform: 'instagram', ready: '—', unlock: 'User search, profiles, posts, explore', setup: 'OpenCLI desktop + Chrome login' },
-  { platform: 'xiaohongshu', ready: '—', unlock: 'Search, notes, comments', setup: 'OpenCLI desktop + Chrome login; xiaohongshu-mcp QR on servers' },
-  { platform: 'linkedin', ready: 'Public pages via Jina Reader', unlock: 'Profiles, companies, jobs', setup: 'linkedin-scraper-mcp with browser login' },
+  { platform: 'search', ready: 'Basic native search', unlock: 'Full semantic search', setup: 'Optional Exa API key' },
+  { platform: 'github', ready: 'Public repos + search', unlock: 'Private repos, Issues/PRs, forks', setup: 'Set GITHUB_TOKEN' },
+  { platform: 'twitter', ready: 'Read single tweet where backend supports it', unlock: 'Search, timelines, articles', setup: 'Set TWITTER_AUTH_TOKEN/TWITTER_CT0 or install twitter-cli' },
+  { platform: 'bilibili', ready: 'Search + video details via bili-cli', unlock: 'Subtitles via OpenCLI', setup: 'Install bili-cli' },
+  { platform: 'reddit', ready: '—', unlock: 'Search + posts/comments', setup: 'Install OpenCLI and login, or rdt-cli + cookie' },
+  { platform: 'facebook', ready: '—', unlock: 'Search, profiles, feed, groups', setup: 'Install OpenCLI and login in Chrome' },
+  { platform: 'instagram', ready: '—', unlock: 'User search, profiles, posts, explore', setup: 'Install OpenCLI and login in Chrome' },
+  { platform: 'xiaohongshu', ready: '—', unlock: 'Search, notes, comments', setup: 'Install OpenCLI and login in Chrome' },
+  { platform: 'linkedin', ready: 'Public pages via Jina Reader', unlock: 'Profiles, companies, jobs', setup: 'Install linkedin-scraper-mcp with browser login' },
   { platform: 'v2ex', ready: 'Hot/node topics, details, replies, users', unlock: '—', setup: 'No configuration required' },
   { platform: 'xueqiu', ready: 'Stock quotes/search/hot lists', unlock: 'Logged-in content', setup: 'Configure Xueqiu cookies from browser' },
   { platform: 'xiaoyuzhou', ready: '—', unlock: 'Podcast transcription', setup: 'Groq or OpenAI Whisper key' },
 ];
 
 export async function ensureFirstStartBootstrap(env: Record<string, string | undefined> = process.env): Promise<void> {
-  const mode = env.PI_SEARCH_BOOTSTRAP ?? 'install_all';
-  if (mode === 'off' || mode === '0' || mode === 'false') return;
-  if (await hasState()) return;
+  const mode = env.PI_SEARCH_BOOTSTRAP ?? 'auto';
+  if (isDisabled(mode)) return;
 
-  try {
-    const result = await runBootstrapMode(mode, env);
+  const existing = await readState(env);
+  if (existing && existing.version >= BOOTSTRAP_STATE_VERSION && !isLegacyBootstrapState(existing)) return;
+
+  if (mode === 'check') {
     await safeWriteState({
-      version: 1,
+      version: BOOTSTRAP_STATE_VERSION,
       ranAt: new Date().toISOString(),
       mode,
-      status: result.status,
-      message: result.message,
-    });
-  } catch (error) {
-    await safeWriteState({
-      version: 1,
-      ranAt: new Date().toISOString(),
-      mode,
-      status: 'error',
-      message: error instanceof Error ? error.message : String(error),
-    });
+      status: 'ok',
+      message: 'First-start check complete. Use /reach-setup to view available backends.',
+    }, env);
+    return;
   }
+
+  await safeRunFirstStartAutomation(mode, env);
 }
 
 export async function callSetupTool(args: Record<string, unknown>, options: SetupOptions = {}): Promise<BackendCallResult> {
-  const action = typeof args.action === 'string' ? args.action as SetupAction : 'status';
+  const action = typeof args.action === 'string' ? args.action as SetupAction : 'auto';
   switch (action) {
+    case 'auto':
+      return runInteractiveSetup(options);
     case 'status':
-      return setupStatus();
+      return setupStatus(options.env);
     case 'plan':
-      return jsonTextResult({ installDoc: INSTALL_DOC_URL, opencliExtension: OPENCLI_EXTENSION_URL, platforms: platformPlan });
+      return setupPlan(options.env);
     case 'install_core':
-      return runAgentReachInstall(['install', '--env=auto'], options);
     case 'install_all':
-      return runAgentReachInstall(['install', '--env=auto', '--channels=all'], options);
+      return handleInstall(action, undefined, options);
     case 'install_channels': {
-      const channels = requireString(args.channels, 'channels');
-      return runAgentReachInstall(['install', '--env=auto', `--channels=${channels}`], options);
+      const raw = typeof args.channels === 'string' ? args.channels : '';
+      if (!raw.trim()) {
+        return jsonTextResult({ status: 'error', message: 'channels parameter is required. Provide comma-separated channel names.' });
+      }
+      const requested = raw.split(',').map((c) => c.trim().toLowerCase()).filter(Boolean);
+      const invalid = requested.filter((c) => !KNOWN_CHANNELS.includes(c));
+      if (invalid.length > 0) {
+        return jsonTextResult({ status: 'error', message: `Unknown channels: ${invalid.join(', ')}. Valid: ${KNOWN_CHANNELS.join(', ')}` });
+      }
+      return handleInstall('install_channels', requested, options);
     }
-    case 'import_cookies':
-      return importBrowserCookies(options);
+    case 'import_cookies': {
+      const provider = typeof args.provider === 'string' ? args.provider : undefined;
+      if (provider) return handleImportCookies(provider, args, options);
+      return handleImportAllCookies(options);
+    }
+    case 'login': {
+      const provider = typeof args.provider === 'string' ? args.provider : undefined;
+      if (!provider) {
+        return jsonTextResult({ status: 'error', message: 'provider parameter is required. Use /reach-setup login <provider> [port] or {action:"login",provider:"...",port?:N}.' });
+      }
+      return handleLogin(provider, args, options);
+    }
     default:
       throw new Error(`Unsupported reach_setup action: ${action}`);
   }
 }
 
-async function setupStatus(): Promise<BackendCallResult> {
-  const state = await readState();
+async function setupStatus(env?: Record<string, string | undefined>): Promise<BackendCallResult> {
+  const effectiveEnv = env ?? process.env;
+  const state = await readState(effectiveEnv);
+  const auth = await readAuthState(effectiveEnv);
+  const live = liveAuthSnapshot(effectiveEnv);
   return jsonTextResult({
-    firstStart: state,
-    installDoc: INSTALL_DOC_URL,
-    opencliExtension: OPENCLI_EXTENSION_URL,
+    firstStart: state ? normalizeBootstrapState(state) : null,
+    authState: auth ?? { version: 1, writtenAt: null, providers: {} },
+    liveProviders: live,
+    localConfig: loadedConfigSummary(effectiveEnv),
+    authDir: displayStateDir(effectiveEnv),
+    cookieState: await savedCookieStatus(effectiveEnv),
     safety: [
-      'First start defaults to install_all. Set PI_SEARCH_BOOTSTRAP=off to disable or PI_SEARCH_ALLOW_INSTALL=0 to block installation.',
-      'After install, existing browser cookies are imported from Chrome/Firefox/Edge/Brave when available unless PI_SEARCH_IMPORT_BROWSER_COOKIES=0.',
-      'OpenCLI Chrome extension install, new browser login, QR login, and API keys may still require user action.',
+      'First start defaults to auto. Set PI_SEARCH_BOOTSTRAP=off to disable startup automation.',
+      'Install actions execute allowed in-house installer commands unless PI_SEARCH_ALLOW_INSTALL=0.',
+      'Startup auto-install can be disabled with PI_SEARCH_AUTO_INSTALL=0.',
+      'Default-browser cookie import is local-only, limited to registered cookie-consuming CLIs, and can be disabled with PI_SEARCH_AUTO_COOKIES=off or PI_SEARCH_BROWSER_AUTOMATION=0.',
+      'macOS may show a Keychain prompt when default-browser cookies are imported.',
+      'Use /reach-setup import_cookies <provider> [endpoint] with an endpoint to import via loopback CDP instead.',
+      'Use /reach-setup login <provider> [port] to launch an isolated login browser via CDP automation.',
+      'Saved storageState files are session secrets and are forwarded as compatible env vars for known CLIs; browser-session backends may still need their own login state.',
     ],
   });
 }
 
-async function runBootstrapMode(mode: string, env: Record<string, string | undefined>): Promise<{ status: BootstrapState['status']; message: string }> {
-  const installArgs = bootstrapInstallArgs(mode);
-  if (installArgs) {
-    if (!installAllowed(env)) {
-      return { status: 'warn', message: `Bootstrap install blocked by PI_SEARCH_ALLOW_INSTALL=${env.PI_SEARCH_ALLOW_INSTALL}. Unset it or set it to 1 to run: agent-reach ${installArgs.join(' ')}` };
+async function runInteractiveSetup(options: SetupOptions): Promise<BackendCallResult> {
+  const env = options.env ?? process.env;
+  const install = installAllowed(env) && !isDisabled(env.PI_SEARCH_AUTO_INSTALL)
+    ? await runSetupInstall('install_core', env, undefined, options.signal)
+    : { status: 'skipped', message: installAllowed(env) ? 'Startup auto-install disabled by PI_SEARCH_AUTO_INSTALL.' : 'Install execution disabled by PI_SEARCH_ALLOW_INSTALL.', installers: [] };
+  const cookies = !isDisabled(env.PI_SEARCH_AUTO_COOKIES) && !isDisabled(env.PI_SEARCH_BROWSER_AUTOMATION)
+    ? await importCookiesFromDefaultBrowser(env, { force: true })
+    : { ok: false, message: 'Browser cookie import disabled by PI_SEARCH_AUTO_COOKIES or PI_SEARCH_BROWSER_AUTOMATION.', results: [] };
+
+  return jsonTextResult({
+    action: 'auto',
+    install,
+    cookies,
+    nextSteps: [
+      'Use /reach-status to inspect active backends.',
+      'Use /reach-login <provider> [port] for headed browser login.',
+      'Use /reach-setup status for config/auth/cookie state.',
+    ],
+  });
+}
+
+function setupPlan(env?: Record<string, string | undefined>): BackendCallResult {
+  const providers = env ? providerSummary(env) : PROVIDER_DESCRIPTORS.map(d => ({
+    provider: d.provider,
+    channel: d.channel,
+    family: d.family,
+    configured: false,
+    keyNames: d.envKeys,
+    loginFlow: d.loginFlow,
+    cookieDomains: d.cookieDomains,
+    risk: d.risk,
+    setup: d.setup,
+  }));
+  return jsonTextResult({
+    platforms: platformPlan,
+    providers,
+    note: 'Install actions execute local installer commands when allowed. import_cookies without endpoint imports from the default browser; import_cookies with endpoint uses loopback CDP.',
+  });
+}
+
+async function safeRunFirstStartAutomation(mode: string, env: Record<string, string | undefined>): Promise<void> {
+  let install: unknown;
+  let cookies: unknown;
+  let status: BootstrapState['status'] = 'ok';
+  let message = DEFAULT_BOOTSTRAP_MESSAGE;
+
+  try {
+    if (installAllowed(env) && !isDisabled(env.PI_SEARCH_AUTO_INSTALL)) {
+      install = await runSetupInstall('install_core', env, undefined);
     }
-    const result = await runCommand('agent-reach', installArgs, { env }, 600_000);
-    const status = commandStatus(result, `agent-reach ${installArgs.join(' ')}`);
-    if (result.code !== 0) return status;
-    const cookies = await importBrowserCookiesSummary({ env });
-    return { ...status, message: [status.message, cookies.message].filter(Boolean).join(' ') };
-  }
-
-  const result = await runCommand('agent-reach', ['doctor', '--json'], { env }, 60_000);
-  if (result.code === 127) {
-    return { status: 'warn', message: `agent-reach not installed. Install guide: ${INSTALL_DOC_URL}` };
-  }
-  return commandStatus(result, 'agent-reach doctor --json');
-}
-
-export function bootstrapInstallArgs(mode: string): string[] | undefined {
-  if (mode === 'safe') return ['install', '--env=auto', '--safe'];
-  if (mode === 'install_core') return ['install', '--env=auto'];
-  if (mode === 'install_all' || mode === 'install-all') return ['install', '--env=auto', '--channels=all'];
-  return undefined;
-}
-
-async function runAgentReachInstall(args: string[], options: SetupOptions): Promise<BackendCallResult> {
-  if (!installAllowed(options.env ?? process.env)) {
-    return jsonTextResult({
-      status: 'blocked',
-      message: `Package installation blocked by PI_SEARCH_ALLOW_INSTALL=${options.env?.PI_SEARCH_ALLOW_INSTALL ?? process.env.PI_SEARCH_ALLOW_INSTALL}. Unset it or set it to 1, then rerun /reach-setup.`,
-      command: `agent-reach ${args.join(' ')}`,
-      installDoc: INSTALL_DOC_URL,
-    });
-  }
-
-  const result = await runCommand('agent-reach', args, options, 600_000);
-  const status = commandStatus(result, `agent-reach ${args.join(' ')}`);
-  const cookies = result.code === 0 ? await importBrowserCookiesSummary(options) : undefined;
-  return textResult([status.message, cookies?.message, result.stdout, result.stderr].filter(Boolean).join('\n\n'), { status, cookies, stdout: result.stdout, stderr: result.stderr });
-}
-
-async function importBrowserCookies(options: SetupOptions): Promise<BackendCallResult> {
-  const summary = await importBrowserCookiesSummary(options);
-  return textResult(summary.message, summary);
-}
-
-async function importBrowserCookiesSummary(options: SetupOptions): Promise<{ status: 'ok' | 'warn'; message: string; attempts: Array<{ browser: string; code: number | null }> }> {
-  if (!browserCookieImportAllowed(options.env ?? process.env)) {
-    return { status: 'warn', message: 'Browser cookie import disabled by PI_SEARCH_IMPORT_BROWSER_COOKIES=0.', attempts: [] };
-  }
-
-  const browsers = browserCandidates(options.env ?? process.env);
-  const attempts: Array<{ browser: string; code: number | null }> = [];
-  const messages: string[] = [];
-  for (const browser of browsers) {
-    const result = await runCommand('agent-reach', ['configure', '--from-browser', browser], options, 180_000);
-    attempts.push({ browser, code: result.code });
-    if (result.code === 0) {
-      messages.push(`Imported existing browser cookies from ${browser}.`);
-      return { status: 'ok', message: messages.join(' '), attempts };
+    if (!isDisabled(env.PI_SEARCH_AUTO_COOKIES) && !isDisabled(env.PI_SEARCH_BROWSER_AUTOMATION)) {
+      cookies = await importCookiesFromDefaultBrowser(env);
     }
+  } catch (error) {
+    status = 'warn';
+    message = error instanceof Error ? error.message : String(error);
   }
 
-  return {
-    status: 'warn',
-    message: `No browser cookies imported. Tried: ${browsers.join(', ')}. User may need to be logged into target sites or approve browser/keychain access.`,
-    attempts,
+  await safeWriteState({
+    version: BOOTSTRAP_STATE_VERSION,
+    ranAt: new Date().toISOString(),
+    mode,
+    status,
+    message,
+    ...(install ? { install } : {}),
+    ...(cookies ? { cookies } : {}),
+  }, env);
+}
+
+async function handleInstall(action: 'install_core' | 'install_all' | 'install_channels', channels: string[] | undefined, options: SetupOptions): Promise<BackendCallResult> {
+  const env = options.env ?? process.env;
+  if (!installAllowed(env)) return structuredInstallDescriptor(action, env, channels, 'Installation disabled by PI_SEARCH_ALLOW_INSTALL=0.');
+  const result = await runSetupInstall(action, env, channels, options.signal);
+  return jsonTextResult(result);
+}
+
+function structuredInstallDescriptor(action: string, env?: Record<string, string | undefined>, channels?: string[], message = 'Installation disabled; returning structured install plan only.'): BackendCallResult {
+  const allProviders = env ? providerSummary(env) : PROVIDER_DESCRIPTORS.map(d => ({
+    provider: d.provider,
+    channel: d.channel,
+    family: d.family,
+    configured: false,
+    keyNames: d.envKeys,
+    loginFlow: d.loginFlow,
+    cookieDomains: d.cookieDomains,
+    risk: d.risk,
+    setup: d.setup,
+  }));
+  const backends = channels
+    ? allProviders.filter((p) => channels.includes(p.channel))
+    : allProviders;
+  return jsonTextResult({
+    descriptor: true,
+    action,
+    message,
+    backends,
+  });
+}
+
+async function handleImportAllCookies(options: SetupOptions): Promise<BackendCallResult> {
+  const env = options.env ?? process.env;
+  return jsonTextResult(await importCookiesFromDefaultBrowser(env, { force: true }));
+}
+
+async function handleImportCookies(provider: string, args: Record<string, unknown>, options: SetupOptions): Promise<BackendCallResult> {
+  const env = options.env ?? process.env;
+  const desc = findProvider(provider);
+  if (!desc) {
+    return jsonTextResult({ status: 'error', message: `Unknown provider: ${provider}. Use /reach-setup import_cookies without arguments to list providers.` });
+  }
+  if (desc.cookieDomains.length === 0) {
+    return jsonTextResult({ status: 'error', message: `Provider ${provider} (${desc.loginFlow}) does not use cookies. Cannot import cookies.` });
+  }
+
+  const endpoint = typeof args.endpoint === 'string' && args.endpoint.trim()
+    ? args.endpoint.trim()
+    : env.BROWSER_CDP_ENDPOINT?.trim();
+
+  try {
+    const result = endpoint
+      ? await importCookiesFromCdp(provider, endpoint, env, options.signal)
+      : await importCookiesFromDefaultBrowser(env, { providers: [provider], force: true });
+    return jsonTextResult(result);
+  } catch (err) {
+    return jsonTextResult({ ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+async function handleLogin(provider: string, args: Record<string, unknown>, options: SetupOptions): Promise<BackendCallResult> {
+  const env = options.env ?? process.env;
+  const desc = findProvider(provider);
+  if (!desc) {
+    return jsonTextResult({ status: 'error', message: `Unknown provider: ${provider}. Use /reach-setup plan to list providers.` });
+  }
+  if (desc.cookieDomains.length === 0) {
+    return jsonTextResult({ status: 'error', message: `Provider ${provider} (${desc.loginFlow}) does not use cookies. Cannot automate login.` });
+  }
+  if (!desc.loginUrl) {
+    return jsonTextResult({ status: 'error', message: `Provider ${provider} has no configured login URL. Cannot automate login.` });
+  }
+
+  const port = typeof args.port === 'number' ? args.port : 9222;
+  const timeoutMs = typeof args.timeoutMs === 'number' ? args.timeoutMs : 300_000;
+
+  try {
+    const result = await loginViaCdp(provider, port, env, options.signal, timeoutMs);
+    return jsonTextResult(result);
+  } catch (err) {
+    return jsonTextResult({ ok: false, message: err instanceof Error ? err.message : String(err) });
+  }
+}
+
+export async function writeAuthState(env: Record<string, string | undefined>): Promise<void> {
+  const providers: Record<string, { configured: boolean; keys: string[] }> = {};
+  for (const desc of PROVIDER_DESCRIPTORS) {
+    if (desc.envKeys.length === 0) continue;
+    const present = desc.envKeys.filter((k) => typeof env[k] === 'string' && env[k]!.length > 0);
+    providers[desc.provider] = { configured: present.length > 0, keys: present };
+  }
+  const state = {
+    version: 1,
+    writtenAt: new Date().toISOString(),
+    providers,
   };
+  try {
+    const path = authStatePath(env);
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await writeFile(path, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+  } catch {
+    // Non-critical
+  }
 }
 
 export function installAllowed(env: Record<string, string | undefined>): boolean {
   return !isDisabled(env.PI_SEARCH_ALLOW_INSTALL);
-}
-
-function browserCookieImportAllowed(env: Record<string, string | undefined>): boolean {
-  return !isDisabled(env.PI_SEARCH_IMPORT_BROWSER_COOKIES);
-}
-
-function browserCandidates(env: Record<string, string | undefined>): string[] {
-  const raw = env.PI_SEARCH_BROWSER_COOKIE_BROWSERS;
-  if (raw?.trim()) return raw.split(',').map((item) => item.trim()).filter(Boolean);
-  return ['chrome', 'firefox', 'edge', 'brave', 'opera'];
 }
 
 function isDisabled(value: string | undefined): boolean {
@@ -199,85 +329,95 @@ function isDisabled(value: string | undefined): boolean {
   return ['0', 'false', 'no', 'off'].includes(value.trim().toLowerCase());
 }
 
-function commandStatus(result: CommandResult, command: string): { status: BootstrapState['status']; message: string } {
-  if (result.code === 0) return { status: 'ok', message: `${command} completed.` };
-  if (result.code === 127) return { status: 'warn', message: `${command} unavailable. Install Agent Reach first: ${INSTALL_DOC_URL}` };
-  return { status: 'error', message: `${command} failed with exit ${result.code}: ${tail(result.stderr || result.stdout)}` };
-}
-
-async function runCommand(command: string, args: string[], options: SetupOptions, timeoutMs: number): Promise<CommandResult> {
-  return new Promise((resolve) => {
-    let stdout = '';
-    let stderr = '';
-    const child = spawn(command, args, {
-      env: setupEnvironment(options.env ?? process.env),
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-    const abort = () => child.kill('SIGTERM');
-    options.signal?.addEventListener('abort', abort, { once: true });
-
-    child.stdout.on('data', (chunk) => {
-      stdout = (stdout + String(chunk)).slice(-1_000_000);
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr = (stderr + String(chunk)).slice(-1_000_000);
-    });
-    child.on('error', (error: NodeJS.ErrnoException) => {
-      clearTimeout(timer);
-      options.signal?.removeEventListener('abort', abort);
-      resolve({ code: error.code === 'ENOENT' ? 127 : 1, stdout, stderr: error.message });
-    });
-    child.on('close', (code) => {
-      clearTimeout(timer);
-      options.signal?.removeEventListener('abort', abort);
-      resolve({ code, stdout, stderr });
-    });
-  });
-}
-
-function setupEnvironment(env: Record<string, string | undefined>): Record<string, string> {
-  const allowed = [
-    'PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
-    'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'NO_PROXY',
-    'GITHUB_TOKEN', 'GH_TOKEN', 'GROQ_API_KEY', 'OPENAI_API_KEY',
-    'BRAVE_API_KEY', 'EXA_API_KEY', 'TAVILY_API_KEY', 'YOUTUBE_API_KEY',
-    'REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT',
-    'CRAWL4AI_BASE_URL', 'CRAWL4AI_API_TOKEN', 'DEEP_RESEARCH_BASE_URL', 'DEEP_RESEARCH_API_TOKEN',
-    'TWITTER_AUTH_TOKEN', 'TWITTER_CT0', 'OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN',
-    'PI_SEARCH_ALLOW_INSTALL', 'PI_SEARCH_BOOTSTRAP', 'PI_SEARCH_IMPORT_BROWSER_COOKIES', 'PI_SEARCH_BROWSER_COOKIE_BROWSERS',
-  ];
-  return Object.fromEntries(allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key] as string]] : [])));
-}
-
-async function hasState(): Promise<boolean> {
+async function readState(env: Record<string, string | undefined>): Promise<BootstrapState | null> {
   try {
-    await readFile(STATE_PATH, 'utf8');
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function readState(): Promise<BootstrapState | null> {
-  try {
-    return JSON.parse(await readFile(STATE_PATH, 'utf8')) as BootstrapState;
+    return JSON.parse(await readFile(bootstrapStatePath(env), 'utf8')) as BootstrapState;
   } catch {
     return null;
   }
 }
 
-async function safeWriteState(state: BootstrapState): Promise<void> {
+async function readAuthState(env: Record<string, string | undefined>): Promise<unknown> {
   try {
-    await writeState(state);
+    return JSON.parse(await readFile(authStatePath(env), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+async function safeWriteState(state: BootstrapState, env: Record<string, string | undefined>): Promise<void> {
+  try {
+    await writeState(state, env);
   } catch {
     // Startup bootstrap must never prevent extension registration.
   }
 }
 
-async function writeState(state: BootstrapState): Promise<void> {
-  await mkdir(dirname(STATE_PATH), { recursive: true, mode: 0o700 });
-  await writeFile(STATE_PATH, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+async function writeState(state: BootstrapState, env: Record<string, string | undefined>): Promise<void> {
+  const path = bootstrapStatePath(env);
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+}
+
+async function savedCookieStatus(env: Record<string, string | undefined>): Promise<CookieStatus[]> {
+  const dir = cookieStateDir(env);
+  try {
+    const files = (await readdir(dir)).filter((file) => file.endsWith('.storageState.json'));
+    const summaries = await Promise.all(files.map(async (file) => {
+      const path = join(dir, file);
+      const [raw, meta] = await Promise.all([readFile(path, 'utf8'), stat(path)]);
+      const parsed = JSON.parse(raw) as { cookies?: Array<{ domain?: unknown }> };
+      const cookies = Array.isArray(parsed.cookies) ? parsed.cookies : [];
+      const domains = [...new Set(cookies.flatMap((cookie) => (typeof cookie.domain === 'string' ? [cookie.domain] : [])))];
+      return {
+        provider: basename(file, '.storageState.json'),
+        path,
+        cookieCount: cookies.length,
+        domains,
+        updatedAt: meta.mtime.toISOString(),
+      };
+    }));
+    return summaries.sort((a, b) => a.provider.localeCompare(b.provider));
+  } catch {
+    return [];
+  }
+}
+
+function normalizeBootstrapState(state: BootstrapState): BootstrapState {
+  if (!isLegacyBootstrapState(state) && state.version >= BOOTSTRAP_STATE_VERSION) return state;
+  return {
+    version: BOOTSTRAP_STATE_VERSION,
+    ranAt: state.ranAt,
+    mode: state.mode,
+    status: 'ok',
+    message: DEFAULT_BOOTSTRAP_MESSAGE,
+  };
+}
+
+function isLegacyBootstrapState(state: BootstrapState): boolean {
+  return state.version < BOOTSTRAP_STATE_VERSION || /agent-reach|Panniantong/i.test(state.message);
+}
+
+function baseStateDir(env: Record<string, string | undefined>): string {
+  return env.PI_SEARCH_STATE_DIR?.trim() || DEFAULT_STATE_DIR;
+}
+
+function displayStateDir(env: Record<string, string | undefined>): string {
+  return env.PI_SEARCH_STATE_DIR?.trim() || DEFAULT_STATE_DIR;
+}
+
+function bootstrapStatePath(env: Record<string, string | undefined>): string {
+  if (!env.PI_SEARCH_STATE_DIR?.trim()) return STATE_PATH;
+  return join(baseStateDir(env), 'bootstrap.json');
+}
+
+function authStatePath(env: Record<string, string | undefined>): string {
+  if (!env.PI_SEARCH_STATE_DIR?.trim()) return AUTH_STATE_PATH;
+  return join(baseStateDir(env), 'auth-state.json');
+}
+
+function cookieStateDir(env: Record<string, string | undefined>): string {
+  return join(baseStateDir(env), 'cookies');
 }
 
 function jsonTextResult(data: unknown): BackendCallResult {
@@ -286,14 +426,4 @@ function jsonTextResult(data: unknown): BackendCallResult {
 
 function textResult(text: string, details: unknown): BackendCallResult {
   return { content: [{ type: 'text', text }], details };
-}
-
-function requireString(value: unknown, name: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is required`);
-  return value.trim();
-}
-
-function tail(text: string): string {
-  const cleaned = text.trim();
-  return cleaned.length > 1000 ? cleaned.slice(-1000) : cleaned;
 }

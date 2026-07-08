@@ -1,4 +1,7 @@
 import type { BackendCallResult } from './backend.js';
+import { fetchInit, fetchJson, fetchText, safeResponseJson, safeResponseText, unsafeFetchJson, validatePublicHttpUrl } from './http.js';
+import { normalizeUrl, rrfMerge } from './fusion.js';
+import { retryWithBackoff } from './retry.js';
 import { callReachTool } from './reach-tools.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
@@ -12,9 +15,41 @@ interface WebResult {
   title: string;
   url: string;
   snippet?: string | undefined;
+  source?: string | undefined;
+  rrfScore?: number | undefined;
 }
 
-const MAX_FETCH_CHARS = 1_000_000;
+interface WebSearchBackend {
+  name: string;
+  configured: (env: Record<string, string | undefined>) => boolean;
+  search: (query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal) => Promise<WebResult[]>;
+}
+
+const WEB_SEARCH_LIMIT_MAX = 20;
+const RESEARCH_LIMIT_MAX = 30;
+const SEMANTIC_TOP_K_MAX = 20;
+const SEMANTIC_MAX_PAGES_MAX = 25;
+
+const SEARCH_BACKENDS: WebSearchBackend[] = [
+  { name: 'duckduckgo', configured: () => true, search: (query, limit, _env, signal) => searchDuckDuckGo(query, limit, signal) },
+  { name: 'searxng', configured: (env) => Boolean(env.SEARXNG_BASE_URL?.trim()), search: searchSearxng },
+  { name: 'brave', configured: (env) => Boolean(env.BRAVE_API_KEY?.trim()), search: searchBrave },
+  { name: 'exa', configured: (env) => Boolean(env.EXA_API_KEY?.trim()), search: searchExa },
+  { name: 'tavily', configured: (env) => Boolean(env.TAVILY_API_KEY?.trim()), search: searchTavily },
+  { name: 'ollama-search', configured: (env) => Boolean((env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim()), search: searchOllama },
+];
+
+const CATEGORY_HINTS: Record<string, string> = {
+  company: 'official website leadership funding product pricing',
+  'research paper': 'paper arxiv doi citation pdf',
+  news: 'latest news report analysis',
+  pdf: 'filetype:pdf',
+  github: 'site:github.com repository source code',
+  tweet: 'site:x.com OR site:twitter.com tweet thread',
+  'personal site': 'personal website blog about',
+  people: 'profile biography linkedin personal site',
+  'financial report': 'annual report 10-k investor relations earnings',
+};
 
 export async function callNativeTool(
   name: string,
@@ -46,15 +81,64 @@ export async function callNativeTool(
 
 async function webSearch(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
   const query = requireString(args.query, 'query');
-  const limit = numberOrDefault(args.limit, 8);
-  const results = await searchDuckDuckGo(query, limit, options.signal);
-  return textResult(formatWebResults(query, results), { query, results });
+  const category = typeof args.category === 'string' ? args.category : undefined;
+  const effectiveQuery = category && CATEGORY_HINTS[category] ? `${query} ${CATEGORY_HINTS[category]}` : query;
+  const limit = clampedNumber(args.limit, 8, 1, WEB_SEARCH_LIMIT_MAX);
+  const env = options.env ?? process.env;
+  const requested = parseBackendOverride(env.PI_SEARCH_WEB_BACKENDS ?? env.SEARCH_WEB_BACKENDS);
+  const unknownBackends = requested.filter((name) => !SEARCH_BACKENDS.some((backend) => backend.name === name));
+  if (unknownBackends.length > 0) {
+    throw new Error(`No known web search backends requested: ${unknownBackends.join(', ')}`);
+  }
+  const candidates = requested.length
+    ? SEARCH_BACKENDS.filter((backend) => requested.includes(backend.name))
+    : SEARCH_BACKENDS;
+  const backends = candidates.filter((backend) => backend.configured(env));
+  if (requested.length > 0 && backends.length === 0) {
+    throw new Error(`Requested web search backends are not configured: ${requested.join(', ')}`);
+  }
+  const failures: Array<{ backend: string; error: string }> = [];
+
+  const settled = await Promise.allSettled(backends.map(async (backend) => {
+    const results = await retryWithBackoff<WebResult[]>(
+      () => backend.search(effectiveQuery, limit, env, options.signal),
+      { maxAttempts: backend.name === 'duckduckgo' ? 1 : 2 },
+    );
+    return { backend: backend.name, results: results.map((result) => ({ ...result, source: result.source ?? backend.name })) };
+  }));
+
+  const rankings: WebResult[][] = [];
+  const servedBackends: string[] = [];
+  settled.forEach((item, index) => {
+    if (item.status === 'fulfilled') {
+      servedBackends.push(item.value.backend);
+      rankings.push(item.value.results);
+      return;
+    }
+    failures.push({ backend: backends[index]?.name ?? 'unknown', error: item.reason instanceof Error ? item.reason.message : String(item.reason) });
+  });
+
+  const fused = rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) })
+    .slice(0, limit)
+    .map(({ item, rrfScore }) => ({ ...item, rrfScore, title: item.title || item.url, snippet: item.snippet ?? '', source: item.source ?? 'unknown' }));
+
+  if (fused.length === 0 && failures.length > 0) {
+    throw new Error(`All web search backends failed: ${failures.map((failure) => `${failure.backend}: ${failure.error}`).join('; ')}`);
+  }
+
+  return textResult(formatWebResults(query, fused), {
+    query,
+    effectiveQuery,
+    category,
+    results: fused,
+    fusion: { method: 'rrf', backends: servedBackends, failures, configuredBackends: backends.map((backend) => backend.name) },
+  });
 }
 
 async function semanticCrawl(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
   const query = requireString(args.query, 'query');
-  const topK = numberOrDefault(args.topK, 8);
-  const maxPages = numberOrDefault(args.maxPages, 10);
+  const topK = clampedNumber(args.topK, 8, 1, SEMANTIC_TOP_K_MAX);
+  const maxPages = clampedNumber(args.maxPages, 10, 1, SEMANTIC_MAX_PAGES_MAX);
   const source = asRecord(args.source);
   const urls = await semanticSourceUrls(source, query, maxPages, options.signal);
   const chunks: Array<{ url: string; title: string; content: string; score: number }> = [];
@@ -104,7 +188,7 @@ async function research(args: Record<string, unknown>, options: NativeToolOption
 
   const query = requireString(args.query, 'query');
   const source = typeof args.source === 'string' ? args.source : 'all';
-  const limit = numberOrDefault(args.limit, 12);
+  const limit = clampedNumber(args.limit, 12, 1, RESEARCH_LIMIT_MAX);
   const results = await researchResults(query, source, limit, options.signal);
   const text = results.length
     ? results.map((result, index) => `## ${index + 1}. ${result.title}\n${result.url}\n${result.snippet ?? ''}`).join('\n\n')
@@ -246,6 +330,95 @@ async function searchDuckDuckGoHtml(query: string, limit: number, signal?: Abort
     .slice(0, limit);
 }
 
+async function searchSearxng(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
+  const baseUrl = env.SEARXNG_BASE_URL?.trim();
+  if (!baseUrl) return [];
+  const url = new URL(`${baseUrl.replace(/\/+$/, '')}/search`);
+  url.searchParams.set('q', query);
+  url.searchParams.set('format', 'json');
+  url.searchParams.set('safesearch', '1');
+  const data = await unsafeFetchJson(url.href, { Accept: 'application/json' }, signal) as { results?: Array<Record<string, unknown>> };
+  return (data.results ?? []).slice(0, limit).map((result) => ({
+    title: stringField(result.title, 'Untitled'),
+    url: stringField(result.url, ''),
+    snippet: stringField(result.content, ''),
+    source: 'searxng',
+  })).filter((result) => result.url);
+}
+
+async function searchBrave(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
+  const apiKey = env.BRAVE_API_KEY?.trim();
+  if (!apiKey) return [];
+  const url = new URL('https://api.search.brave.com/res/v1/web/search');
+  url.searchParams.set('q', query);
+  url.searchParams.set('count', String(Math.min(limit, 20)));
+  const data = await fetchJson(url.href, { Accept: 'application/json', 'X-Subscription-Token': apiKey }, signal) as { web?: { results?: Array<Record<string, unknown>> } };
+  return (data.web?.results ?? []).slice(0, limit).map((result) => ({
+    title: stringField(result.title, 'Untitled'),
+    url: stringField(result.url, ''),
+    snippet: stringField(result.description, ''),
+    source: 'brave',
+  })).filter((result) => result.url);
+}
+
+async function searchExa(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
+  const apiKey = env.EXA_API_KEY?.trim();
+  if (!apiKey) return [];
+  const response = await fetch('https://api.exa.ai/search', {
+    method: 'POST',
+    body: JSON.stringify({ query, numResults: limit, type: 'auto', useAutoprompt: true, contents: { text: true, highlights: true, summary: true } }),
+    ...fetchInit({ Accept: 'application/json', 'Content-Type': 'application/json', 'x-api-key': apiKey }, signal),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status} for Exa`);
+  const data = await safeResponseJson(response, 'https://api.exa.ai/search') as { results?: Array<Record<string, unknown>> };
+  return (data.results ?? []).slice(0, limit).map((result) => ({
+    title: stringField(result.title, 'Untitled'),
+    url: stringField(result.url, ''),
+    snippet: stringField(result.summary, stringField(result.text, '')),
+    source: 'exa',
+  })).filter((result) => result.url);
+}
+
+async function searchTavily(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
+  const apiKey = env.TAVILY_API_KEY?.trim();
+  if (!apiKey) return [];
+  const response = await fetch('https://api.tavily.com/search', {
+    method: 'POST',
+    body: JSON.stringify({ query, max_results: Math.min(limit, 20), search_depth: 'basic', include_answer: 'basic', include_raw_content: false, include_images: false }),
+    ...fetchInit({ Accept: 'application/json', 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, signal),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status} for Tavily`);
+  const data = await safeResponseJson(response, 'https://api.tavily.com/search') as { answer?: string; results?: Array<Record<string, unknown>> };
+  return (data.results ?? []).slice(0, limit).map((result, index) => ({
+    title: stringField(result.title, 'Untitled'),
+    url: stringField(result.url, ''),
+    snippet: index === 0 && data.answer ? `${data.answer}\n\n${stringField(result.content, '')}` : stringField(result.content, ''),
+    source: 'tavily',
+  })).filter((result) => result.url);
+}
+
+async function searchOllama(query: string, limit: number, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<WebResult[]> {
+  const baseUrl = (env.OLLAMA_SEARCH_BASE_URL ?? env.SEARCH_OLLAMA_BASE_URL)?.trim();
+  if (!baseUrl) return [];
+  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/json' };
+  const apiKey = (env.OLLAMA_SEARCH_API_KEY ?? env.SEARCH_OLLAMA_API_KEY)?.trim();
+  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
+  const searchUrl = `${baseUrl.replace(/\/+$/, '')}/api/experimental/web_search`;
+  const response = await fetch(searchUrl, {
+    method: 'POST',
+    body: JSON.stringify({ query, max_results: limit }),
+    ...fetchInit(headers, signal),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status} for Ollama search`);
+  const data = await safeResponseJson(response, searchUrl) as { results?: Array<Record<string, unknown>> };
+  return (data.results ?? []).slice(0, limit).map((result) => ({
+    title: stringField(result.title, 'Untitled'),
+    url: stringField(result.url, ''),
+    snippet: stringField(result.content, ''),
+    source: 'ollama-search',
+  })).filter((result) => result.url);
+}
+
 async function searchWikipedia(query: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
   const url = new URL('https://en.wikipedia.org/w/api.php');
   url.searchParams.set('action', 'opensearch');
@@ -311,49 +484,8 @@ async function githubJson(url: string, env: Record<string, string | undefined>, 
   };
   if (env.GITHUB_TOKEN) headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
   const response = await fetch(url, fetchInit(headers, signal));
-  if (!response.ok) throw new Error(`GitHub HTTP ${response.status}: ${await response.text()}`);
-  return response.json();
-}
-
-async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
-  const response = await fetch(validatePublicHttpUrl(url), fetchInit({ 'User-Agent': 'pi-extension-search' }, signal));
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-  return response.json();
-}
-
-async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
-  const response = await fetch(validatePublicHttpUrl(url), fetchInit({ 'User-Agent': 'pi-extension-search' }, signal));
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-  return (await response.text()).slice(0, MAX_FETCH_CHARS);
-}
-
-function fetchInit(headers: Record<string, string>, signal: AbortSignal | undefined): RequestInit {
-  return {
-    headers,
-    ...(signal ? { signal } : {}),
-  };
-}
-
-function validatePublicHttpUrl(raw: string): string {
-  const url = new URL(raw.trim());
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Disallowed URL scheme: ${url.protocol}`);
-  const host = url.hostname.toLowerCase();
-  if (
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host === '0.0.0.0' ||
-    host.startsWith('127.') ||
-    host.startsWith('10.') ||
-    host.startsWith('192.168.') ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
-    host === '169.254.169.254' ||
-    host === '::1' ||
-    host.startsWith('fc') ||
-    host.startsWith('fd')
-  ) {
-    throw new Error(`Disallowed private or local host: ${host}`);
-  }
-  return url.href;
+  if (!response.ok) throw new Error(`GitHub HTTP ${response.status}: ${await safeResponseText(response, url, 4_000)}`);
+  return safeResponseJson(response, url);
 }
 
 function stripHtml(html: string): string {
@@ -428,6 +560,18 @@ function requireString(value: unknown, name: string): string {
 
 function numberOrDefault(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+function clampedNumber(value: unknown, fallback: number, min: number, max: number): number {
+  return Math.min(Math.max(Math.trunc(numberOrDefault(value, fallback)), min), max);
+}
+
+function parseBackendOverride(value: string | undefined): string[] {
+  return value?.split(',').map((item) => item.trim().toLowerCase()).filter(Boolean) ?? [];
+}
+
+function stringField(value: unknown, fallback: string): string {
+  return typeof value === 'string' && value.trim() ? value : fallback;
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

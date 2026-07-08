@@ -6,6 +6,7 @@ import { normalizeProviderPayload } from './payload.js';
 import { registerGitHubTool } from './github.js';
 import { callSetupTool, ensureFirstStartBootstrap } from './bootstrap.js';
 import { loadSearchMcpEnvironment } from './local-config.js';
+import { PROVIDER_DESCRIPTORS } from './providers.js';
 
 const searchCategoryNames = [
   'company',
@@ -36,6 +37,7 @@ const researchSources = [
 ] as const;
 
 const reachFamilies = ['social', 'video', 'feeds', 'web', 'dev', 'research'] as const;
+const setupActions = ['auto', 'status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies', 'login'] as const;
 const socialPlatforms = ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook', 'instagram'] as const;
 const videoPlatforms = ['youtube', 'bilibili'] as const;
 
@@ -48,9 +50,7 @@ export default function (pi: ExtensionAPI): void {
     void client.close();
   });
 
-  pi.on('before_provider_request', (event) => {
-    event.payload = normalizeProviderPayload(event.payload);
-  });
+  pi.on('before_provider_request', (event) => normalizeProviderPayload(event.payload));
 
   registerGitHubTool(pi, client);
   registerExpansionCommands(pi, env);
@@ -172,17 +172,42 @@ function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string 
   });
 
   pi.registerCommand('reach-setup', {
-    description: 'Show or run setup for external backends. Usage: /reach-setup [status|plan|install_core|install_all|install_channels channels|import_cookies]',
-    getArgumentCompletions: (prefix) => ['status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies']
-      .filter((action) => action.startsWith(prefix))
-      .map((action) => ({ value: action, label: action })),
+    description: 'Run local setup by default. Usage: /reach-setup [auto|status|plan|install_core|install_all|install_channels <channels>|import_cookies [provider] [cdp-endpoint]|login <provider> [port]]',
+    getArgumentCompletions: (prefix) => {
+      const actionMatches = setupActions
+        .filter((action) => action.startsWith(prefix))
+        .map((action) => ({ value: action, label: action }));
+      if (actionMatches.length > 0) return actionMatches;
+      return PROVIDER_DESCRIPTORS
+        .filter((provider) => provider.cookieDomains.length > 0 && provider.provider.startsWith(prefix))
+        .map((provider) => ({ value: provider.provider, label: provider.provider }));
+    },
     handler: async (args, ctx) => {
-      const [action = 'status', ...rest] = args.trim().split(/\s+/).filter(Boolean);
-      const params = { action, ...(rest.length ? { channels: rest.join(',') } : {}) };
+      const [action = 'auto', ...rest] = args.trim().split(/\s+/).filter(Boolean);
+      const params = setupCommandParams(action, rest);
       const result = await callSetupTool(params, { env, ...(ctx.signal ? { signal: ctx.signal } : {}) });
       await showCommandResult(ctx, 'Reach Setup', resultToText(result));
     },
   });
+
+  pi.registerCommand('reach-login', {
+    description: 'Launch headed browser login for a cookie-backed provider. Usage: /reach-login <provider> [port]',
+    getArgumentCompletions: (prefix) => PROVIDER_DESCRIPTORS
+      .filter((provider) => provider.cookieDomains.length > 0 && provider.provider.startsWith(prefix))
+      .map((provider) => ({ value: provider.provider, label: provider.provider })),
+    handler: async (args, ctx) => {
+      const [provider, port] = args.trim().split(/\s+/).filter(Boolean);
+      const result = await callSetupTool({ action: 'login', ...(provider ? { provider } : {}), ...(port ? { port: Number(port) } : {}) }, { env, ...(ctx.signal ? { signal: ctx.signal } : {}) });
+      await showCommandResult(ctx, 'Reach Login', resultToText(result));
+    },
+  });
+}
+
+export function setupCommandParams(action: string, rest: string[]): Record<string, unknown> {
+  if (action === 'install_channels') return { action, ...(rest.length ? { channels: rest.join(',') } : {}) };
+  if (action === 'import_cookies') return { action, ...(rest[0] ? { provider: rest[0] } : {}), ...(rest[1] ? { endpoint: rest[1] } : {}) };
+  if (action === 'login') return { action, ...(rest[0] ? { provider: rest[0] } : {}), ...(rest[1] ? { port: Number(rest[1]) } : {}) };
+  return { action };
 }
 
 async function callSetupOrStatus(name: string, args: Record<string, unknown>, env: Record<string, string | undefined>, signal: AbortSignal | undefined) {
@@ -221,6 +246,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend): void {
       username: Type.Optional(Type.String()),
       subreddit: Type.Optional(Type.String()),
       node: Type.Optional(Type.String()),
+      filter: Type.Optional(StringEnum(['hot', 'popular'] as const)),
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {

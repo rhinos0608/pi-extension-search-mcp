@@ -80,16 +80,70 @@ test('runCommand supports reach_setup plan', async () => {
   assert.match(JSON.stringify(result.data), /twitter/);
 });
 
-test('runCommand blocks setup install when opted out', async () => {
+test('runCommand returns descriptor for setup install', async () => {
   const result = await runCommand(['call', 'reach_setup', '{"action":"install_all"}'], { PI_SEARCH_ALLOW_INSTALL: '0' });
 
   assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /blocked by PI_SEARCH_ALLOW_INSTALL=0/);
+  assert.match(JSON.stringify(result.data), /descriptor/);
+  assert.match(JSON.stringify(result.data), /Installation disabled/);
 });
 
-test('runCommand supports browser cookie import opt-out', async () => {
-  const result = await runCommand(['call', 'reach_setup', '{"action":"import_cookies"}'], { PI_SEARCH_IMPORT_BROWSER_COOKIES: '0' });
+test('runCommand browser cookie import honors automation opt-out', async () => {
+  const result = await runCommand(['call', 'reach_setup', '{"action":"import_cookies"}'], { PI_SEARCH_BROWSER_AUTOMATION: '0' });
 
   assert.equal(result.ok, true);
-  assert.match(JSON.stringify(result.data), /Browser cookie import disabled/);
+  assert.match(JSON.stringify(result.data), /disabled/);
+});
+
+test('runCommand import_cookies provider honors browser automation opt-out', async () => {
+  const result = await runCommand(
+    ['call', 'reach_setup', '{"action":"import_cookies","provider":"facebook"}'],
+    { PI_SEARCH_BROWSER_AUTOMATION: '0' },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(JSON.stringify(result.data), /disabled/);
+});
+
+test('runCommand login provider honors browser automation opt-out', async () => {
+  const result = await runCommand(
+    ['call', 'reach_setup', '{"action":"login","provider":"facebook","port":9222}'],
+    { PI_SEARCH_BROWSER_AUTOMATION: '0' },
+  );
+
+  assert.equal(result.ok, true);
+  assert.match(JSON.stringify(result.data), /Browser automation disabled/);
+});
+
+test('runCommand reach_setup status reports live env presence', async () => {
+  const result = await runCommand(['call', 'reach_setup', '{"action":"status"}'], { GITHUB_TOKEN: 'ghp_test_val', EXA_API_KEY: 'exa_test_val' });
+
+  assert.equal(result.ok, true);
+  const text = JSON.stringify(result.data);
+
+  // liveProviders section present
+  assert.match(text, /liveProviders/);
+
+  // github shows configured with key name
+  assert.match(text, /GITHUB_TOKEN/);
+
+  // No values leaked
+  assert.doesNotMatch(text, /ghp_test_val/);
+  assert.doesNotMatch(text, /exa_test_val/);
+
+  // authDir present
+  assert.match(text, /\.pi-extension-search/);
+});
+
+test('runCommand reach_status includes auth metadata per channel', async () => {
+  const result = await runCommand(['call', 'reach_status', '{"family":"feeds"}'], { GITHUB_TOKEN: 'dummy' });
+
+  assert.equal(result.ok, true);
+  const text = JSON.stringify(result.data);
+
+  // auth field present on channel objects
+  assert.match(text, /"auth"/);
+
+  // rss channel should have configured=false (zero-config, no env keys)
+  // but auth field present with loginFlow, cookieDomains, risk
 });

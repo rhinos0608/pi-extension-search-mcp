@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict';
+import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { test } from 'node:test';
 import { callNativeTool } from '../src/native-tools.js';
+import { sanitizeExternalOutput } from '../src/reach-tools.js';
+import { writeCookieState } from '../src/cookie-jar.js';
 
 test('callNativeTool rejects unsupported tools', async () => {
   await assert.rejects(
@@ -12,6 +17,39 @@ test('callNativeTool rejects unsupported tools', async () => {
 test('native browse rejects private localhost URLs before fetching', async () => {
   await assert.rejects(
     () => callNativeTool('agentic_browse', { action: 'read', url: 'http://localhost:3000' }),
+    /Disallowed private or local host/,
+  );
+});
+
+test('native browse rejects IPv6 link-local and carrier-grade NAT hosts', async () => {
+  await assert.rejects(
+    () => callNativeTool('agentic_browse', { action: 'read', url: 'http://[fe80::1]/' }),
+    /Disallowed private or local host/,
+  );
+  await assert.rejects(
+    () => callNativeTool('agentic_browse', { action: 'read', url: 'http://100.64.0.1/' }),
+    /Disallowed private or local host/,
+  );
+});
+
+test('native browse rejects 0.x and IPv4-mapped IPv6 loopback hosts', async () => {
+  await assert.rejects(
+    () => callNativeTool('agentic_browse', { action: 'read', url: 'http://0.1.2.3/' }),
+    /Disallowed private or local host/,
+  );
+  await assert.rejects(
+    () => callNativeTool('agentic_browse', { action: 'read', url: 'http://[::ffff:7f00:1]/' }),
+    /Disallowed private or local host/,
+  );
+});
+
+test('social external wrappers reject IPv6 link-local and carrier-grade NAT hosts', async () => {
+  await assert.rejects(
+    () => callNativeTool('social', { platform: 'twitter', action: 'read', url: 'http://[fe80::1]/tweet' }),
+    /Disallowed private or local host/,
+  );
+  await assert.rejects(
+    () => callNativeTool('social', { platform: 'twitter', action: 'read', url: 'http://100.127.0.1/tweet' }),
     /Disallowed private or local host/,
   );
 });
@@ -57,14 +95,231 @@ test('video external wrappers reject non-http URL schemes', async () => {
   );
 });
 
-test('reach_setup install actions are blocked when opted out', async () => {
-  const result = await callNativeTool('reach_setup', { action: 'install_core' }, { env: { PI_SEARCH_ALLOW_INSTALL: '0' } });
+test('native web_search fans out configured backends and fuses duplicate URLs with RRF', async () => {
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = String(input);
+    if (url.startsWith('https://api.duckduckgo.com/')) {
+      return new Response(JSON.stringify({
+        Heading: 'Example',
+        AbstractURL: 'https://example.com/page?utm_source=ddg',
+        AbstractText: 'Duck result',
+        RelatedTopics: [],
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    if (url.startsWith('https://api.search.brave.com/')) {
+      return new Response(JSON.stringify({
+        web: { results: [{ title: 'Example brave', url: 'https://www.example.com/page', description: 'Brave result' }] },
+      }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    throw new Error(`unexpected fetch ${url}`);
+  };
 
-  assert.match(JSON.stringify(result.details), /blocked by PI_SEARCH_ALLOW_INSTALL=0/);
+  try {
+    const result = await callNativeTool('web_search', { query: 'example', limit: 5 }, { env: { BRAVE_API_KEY: 'key' } });
+    const details = result.details as { results: Array<{ url: string; rrfScore?: number }>; fusion: { backends: string[] } };
+
+    assert.equal(details.results.length, 1);
+    assert.deepEqual(details.fusion.backends.sort(), ['brave', 'duckduckgo']);
+    assert.ok((details.results[0]?.rrfScore ?? 0) > 0.03);
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
 });
 
-test('reach_setup import cookies can be opted out', async () => {
-  const result = await callNativeTool('reach_setup', { action: 'import_cookies' }, { env: { PI_SEARCH_IMPORT_BROWSER_COOKIES: '0' } });
+test('native web_search sends auth headers for POST backends', async () => {
+  const cases = [
+    {
+      backend: 'exa',
+      env: { PI_SEARCH_WEB_BACKENDS: 'exa', EXA_API_KEY: 'exa-key' },
+      expectedUrl: 'https://api.exa.ai/search',
+      expectedHeaders: { 'x-api-key': 'exa-key', 'Content-Type': 'application/json' },
+      response: { results: [{ title: 'Exa', url: 'https://exa.example', summary: 'ok' }] },
+    },
+    {
+      backend: 'tavily',
+      env: { PI_SEARCH_WEB_BACKENDS: 'tavily', TAVILY_API_KEY: 'tav-key' },
+      expectedUrl: 'https://api.tavily.com/search',
+      expectedHeaders: { Authorization: 'Bearer tav-key', 'Content-Type': 'application/json' },
+      response: { results: [{ title: 'Tavily', url: 'https://tavily.example', content: 'ok' }] },
+    },
+    {
+      backend: 'ollama-search',
+      env: { PI_SEARCH_WEB_BACKENDS: 'ollama-search', OLLAMA_SEARCH_BASE_URL: 'https://ollama.example', OLLAMA_SEARCH_API_KEY: 'ollama-key' },
+      expectedUrl: 'https://ollama.example/api/experimental/web_search',
+      expectedHeaders: { Authorization: 'Bearer ollama-key', 'Content-Type': 'application/json' },
+      response: { results: [{ title: 'Ollama', url: 'https://ollama-result.example', content: 'ok' }] },
+    },
+  ];
 
-  assert.match(JSON.stringify(result.details), /Browser cookie import disabled/);
+  for (const item of cases) {
+    const savedFetch = globalThis.fetch;
+    let observedUrl = '';
+    let observedHeaders: Record<string, string> = {};
+    globalThis.fetch = async (input: string | URL | Request, init?: RequestInit) => {
+      observedUrl = String(input);
+      observedHeaders = init?.headers as Record<string, string>;
+      return new Response(JSON.stringify(item.response), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+
+    try {
+      const result = await callNativeTool('web_search', { query: 'example' }, { env: item.env });
+      assert.match(JSON.stringify(result.details), new RegExp(item.backend));
+      assert.equal(observedUrl, item.expectedUrl);
+      for (const [key, value] of Object.entries(item.expectedHeaders)) {
+        assert.equal(observedHeaders[key], value);
+      }
+    } finally {
+      globalThis.fetch = savedFetch;
+    }
+  }
+});
+
+test('native web_search rejects invalid or unconfigured explicit backend override', async () => {
+  await assert.rejects(
+    () => callNativeTool('web_search', { query: 'example' }, { env: { PI_SEARCH_WEB_BACKENDS: 'bogus' } }),
+    /No known web search backends/,
+  );
+  await assert.rejects(
+    () => callNativeTool('web_search', { query: 'example' }, { env: { PI_SEARCH_WEB_BACKENDS: 'exa' } }),
+    /not configured/,
+  );
+});
+
+test('native web_search clamps CLI limit before backend calls', async () => {
+  const savedFetch = globalThis.fetch;
+  let requestedCount = '';
+  globalThis.fetch = async (input: string | URL | Request) => {
+    const url = new URL(String(input));
+    if (url.hostname === 'api.search.brave.com') requestedCount = url.searchParams.get('count') ?? '';
+    if (url.hostname === 'api.duckduckgo.com') {
+      return new Response(JSON.stringify({ Heading: '', RelatedTopics: [] }), { status: 200 });
+    }
+    if (url.hostname === 'duckduckgo.com') {
+      return new Response('', { status: 200 });
+    }
+    if (url.hostname === 'api.search.brave.com') {
+      return new Response(JSON.stringify({ web: { results: [] } }), { status: 200 });
+    }
+    throw new Error(`unexpected fetch ${url.href}`);
+  };
+
+  try {
+    await callNativeTool('web_search', { query: 'example', limit: 100000 }, { env: { BRAVE_API_KEY: 'key' } });
+    assert.equal(requestedCount, '20');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+});
+
+test('reach_setup install returns descriptor', async () => {
+  const result = await callNativeTool('reach_setup', { action: 'install_core' }, { env: { PI_SEARCH_ALLOW_INSTALL: '0' } });
+
+  assert.match(JSON.stringify(result.details), /descriptor/);
+  assert.match(JSON.stringify(result.details), /Installation disabled/);
+});
+
+test('reach_status redacts warning output from external backend probes', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-opencli-'));
+  const opencliPath = join(dir, 'opencli');
+
+  try {
+    await writeFile(opencliPath, '#!/bin/sh\necho "GITHUB_TOKEN=ghp_reach_status_secret" >&2\nexit 1\n');
+    await chmod(opencliPath, 0o700);
+
+    const result = await callNativeTool('reach_status', { family: 'social' }, { env: { PATH: dir } });
+    const text = JSON.stringify(result.details);
+    assert.match(text, /GITHUB_TOKEN=\*\*\*/);
+    assert.doesNotMatch(text, /ghp_reach_status_secret/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('social backend receives saved cookie-derived env and redacts output', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-cookie-forward-'));
+  const twitterPath = join(dir, 'twitter');
+  try {
+    await writeFile(twitterPath, '#!/bin/sh\necho "TWITTER_AUTH_TOKEN=$TWITTER_AUTH_TOKEN"\necho "TWITTER_CT0=$TWITTER_CT0"\necho "TWITTER_COOKIE=$TWITTER_COOKIE"\n');
+    await chmod(twitterPath, 0o700);
+    await writeCookieState('twitter', [
+      { name: 'auth_token', value: 'forwarded-auth-secret', domain: '.x.com', path: '/', expires: 1_900_000_000, httpOnly: true, secure: true, sameSite: 'Lax' },
+      { name: 'ct0', value: 'forwarded-ct0-secret', domain: '.x.com', path: '/', expires: 1_900_000_000, httpOnly: false, secure: true, sameSite: 'Lax' },
+    ], { PI_SEARCH_STATE_DIR: dir }, 'fixture');
+
+    const result = await callNativeTool('social', { platform: 'twitter', action: 'search', query: 'test' }, { env: { PATH: dir, PI_SEARCH_STATE_DIR: dir } });
+    const text = JSON.stringify(result.details);
+
+    assert.match(text, /TWITTER_AUTH_TOKEN=\*\*\*/);
+    assert.match(text, /TWITTER_CT0=\*\*\*/);
+    assert.match(text, /TWITTER_COOKIE=\*\*\*/);
+    assert.doesNotMatch(text, /forwarded-auth-secret|forwarded-ct0-secret/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('sanitizeExternalOutput redacts known secret patterns', () => {
+  const cases = [
+    // Redaction keeps only the key prefix up to : or =, then ***
+    { input: 'Authorization: Bearer sk-1234abc', expected: 'Authorization:***' },
+    { input: 'Set-Cookie: session=abc123', expected: 'Set-Cookie:***' },
+    { input: 'TWITTER_AUTH_TOKEN=super_secret_value_here', expected: 'TWITTER_AUTH_TOKEN=***' },
+    { input: 'apiKey: some_secret_value', expected: 'apiKey:***' },
+    { input: 'GITHUB_TOKEN=ghp_abcd1234', expected: 'GITHUB_TOKEN=***' },
+    { input: 'TWITTER_COOKIE=auth_token=secret; ct0=secret', expected: 'TWITTER_COOKIE=***' },
+    { input: 'YOUTUBE_API_KEY=youtube_secret', expected: 'YOUTUBE_API_KEY=***' },
+    { input: 'DEEP_RESEARCH_API_TOKEN=deep_secret', expected: 'DEEP_RESEARCH_API_TOKEN=***' },
+    { input: 'CRAWL4AI_API_TOKEN=crawl_secret', expected: 'CRAWL4AI_API_TOKEN=***' },
+    { input: 'normal text with no secrets', expected: 'normal text with no secrets' },
+  ];
+  for (const { input, expected } of cases) {
+    assert.equal(sanitizeExternalOutput(input), expected, `Failed for: ${input}`);
+  }
+});
+
+test('reach_setup import cookies honors browser automation opt-out', async () => {
+  const result = await callNativeTool('reach_setup', { action: 'import_cookies' }, { env: { PI_SEARCH_BROWSER_AUTOMATION: '0' } });
+
+  assert.match(JSON.stringify(result.details), /disabled/);
+});
+
+test('reach_setup import cookies provider honors browser automation opt-out', async () => {
+  const result = await callNativeTool('reach_setup', { action: 'import_cookies', provider: 'facebook' }, { env: { PI_SEARCH_BROWSER_AUTOMATION: '0' } });
+
+  assert.match(JSON.stringify(result.details), /disabled/);
+});
+
+test('twitter feed hot or popular filter enables ranking filter', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-twitter-filter-'));
+  const twitterPath = join(dir, 'twitter');
+
+  try {
+    await writeFile(twitterPath, '#!/bin/sh\necho "$@"\n');
+    await chmod(twitterPath, 0o700);
+
+    const result = await callNativeTool('social', { platform: 'twitter', action: 'feed', filter: 'popular', limit: 7 }, { env: { PATH: dir } });
+
+    assert.match(JSON.stringify(result.details), /feed -n 7 --filter/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test('reddit feed filter maps to hot and popular feeds with limits', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'pi-extension-search-reddit-filter-'));
+  const opencliPath = join(dir, 'opencli');
+
+  try {
+    await writeFile(opencliPath, '#!/bin/sh\necho "$@"\n');
+    await chmod(opencliPath, 0o700);
+
+    const hot = await callNativeTool('social', { platform: 'reddit', action: 'feed', filter: 'hot', limit: 6 }, { env: { PATH: dir } });
+    const popular = await callNativeTool('social', { platform: 'reddit', action: 'feed', filter: 'popular', limit: 8 }, { env: { PATH: dir } });
+
+    assert.match(JSON.stringify(hot.details), /reddit hot --limit 6 -f yaml/);
+    assert.match(JSON.stringify(popular.details), /reddit popular --limit 8 -f yaml/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

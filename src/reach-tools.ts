@@ -4,6 +4,9 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { BackendCallResult } from './backend.js';
 import { callSetupTool } from './bootstrap.js';
+import { fetchJson as boundedFetchJson, fetchText as boundedFetchText, validatePublicHttpUrl } from './http.js';
+import { cookieAuthEnvironment } from './cookie-jar.js';
+import { authForChannel } from './providers.js';
 
 export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds';
 
@@ -36,6 +39,7 @@ interface ChannelDefinition {
 
 const COMMAND_TIMEOUT_MS = 120_000;
 const MAX_OUTPUT_CHARS = 1_000_000;
+const SIGKILL_AFTER_MS = 5_000;
 const USER_AGENT = 'pi-extension-search/0.1';
 
 const channels: ChannelDefinition[] = [
@@ -77,9 +81,15 @@ export async function callReachTool(
 async function reachStatus(args: Record<string, unknown>, options: ReachToolOptions): Promise<BackendCallResult> {
   const family = typeof args.family === 'string' ? args.family : undefined;
   const selected = family ? channels.filter((channel) => channel.family === family) : channels;
+  const env = options.env ?? process.env;
   const results = await Promise.all(selected.map((channel) => inspectChannel(channel, options)));
   const usable = results.filter((item) => item.status === 'ok').length;
-  return jsonTextResult({ usable, total: results.length, channels: results });
+  const channelsWithAuth = results.map((r) => {
+    const name = typeof r.name === 'string' ? r.name : '';
+    const auth = authForChannel(name, env);
+    return { ...r, auth: auth ?? { configured: false, keyNames: [], loginFlow: 'unknown', cookieDomains: [], risk: 'low' } };
+  });
+  return jsonTextResult({ usable, total: results.length, channels: channelsWithAuth });
 }
 
 async function inspectChannel(channel: ChannelDefinition, options: ReachToolOptions): Promise<Record<string, unknown>> {
@@ -94,7 +104,7 @@ async function inspectChannel(channel: ChannelDefinition, options: ReachToolOpti
     for (const candidate of candidates) {
       const probe = await runCommand(candidate.command ?? '', probeArgs(candidate.name), options, 8_000);
       if (probe.code === 0) return { ...channel, status: 'ok', active_backend: candidate.name };
-      if (probe.code !== 127) warnings.push({ backend: candidate.name, message: tail(probe.stderr || probe.stdout) });
+      if (probe.code !== 127) warnings.push({ backend: candidate.name, message: tail(sanitizeExternalOutput(probe.stderr || probe.stdout)) });
     }
     if (warnings[0]) return { ...channel, status: 'warn', active_backend: warnings[0].backend, message: warnings[0].message };
     return { ...channel, status: 'off', active_backend: null, message: setupMessage(channel) };
@@ -107,10 +117,28 @@ async function social(args: Record<string, unknown>, options: ReachToolOptions):
   const platform = platformOrInfer(args, ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook', 'instagram']);
   if (platform === 'v2ex') return v2ex(args, options);
 
-  const action = typeof args.action === 'string' ? args.action : 'search';
+  const requestedAction = typeof args.action === 'string' ? args.action : 'search';
+  const filter = requestedAction === 'feed' ? hotPopularFilter(args.filter) : undefined;
+  const action = socialFeedAction(platform, requestedAction, filter);
   const candidates = socialCandidates(platform);
   const result = await runFirstUsable(platform, candidates, action, args, options);
-  return textResult(result.stdout || result.stderr, { platform, action, backend: result.backend, stdout: result.stdout, stderr: result.stderr });
+  return textResult(result.stdout || result.stderr, { platform, action, ...(filter ? { filter } : {}), backend: result.backend, stdout: result.stdout, stderr: result.stderr });
+}
+
+function socialFeedAction(platform: string, action: string, filter: 'hot' | 'popular' | undefined): string {
+  if (action !== 'feed' || !filter) return action;
+  if (platform === 'reddit') return filter;
+  if (platform === 'xiaohongshu' && filter === 'hot') return 'hot';
+  if (platform === 'twitter') return action;
+  throw new Error(`${platform} feed does not support ${filter} filter`);
+}
+
+function hotPopularFilter(value: unknown): 'hot' | 'popular' | undefined {
+  if (value === undefined || value === null || value === '') return undefined;
+  if (typeof value !== 'string') throw new Error('filter must be hot or popular');
+  const normalized = value.toLowerCase();
+  if (normalized === 'hot' || normalized === 'popular') return normalized;
+  throw new Error('filter must be hot or popular');
 }
 
 async function video(args: Record<string, unknown>, options: ReachToolOptions): Promise<BackendCallResult> {
@@ -234,7 +262,7 @@ function twitterCandidate(): ExternalCandidate {
         case 'article': return ['article', publicUrlOrId(input)];
         case 'user': return ['user', requireString(input.user ?? input.username, 'user')];
         case 'user_posts': return ['user-posts', requireString(input.user ?? input.username, 'user'), '-n', limit];
-        case 'feed': return ['feed', '-n', limit];
+        case 'feed': return ['feed', '-n', limit, ...(hotPopularFilter(input.filter) ? ['--filter'] : [])];
         default: throw new Error(`Unsupported twitter action: ${action}`);
       }
     },
@@ -261,15 +289,16 @@ function openCliCandidate(platform: string): ExternalCandidate {
         case 'reddit':
           if (action === 'search') return [...base, 'search', requireString(input.query, 'query'), '-f', 'yaml'];
           if (action === 'read') return [...base, 'read', publicUrlOrId(input, 'id or url'), '-f', 'yaml'];
+          if (action === 'feed') return [...base, 'home', '--limit', limit, '-f', 'yaml'];
           if (action === 'subreddit') return [...base, 'subreddit', requireString(input.subreddit, 'subreddit'), '-f', 'yaml'];
-          if (action === 'hot' || action === 'popular') return [...base, action, '-f', 'yaml'];
+          if (action === 'hot' || action === 'popular') return [...base, action, '--limit', limit, '-f', 'yaml'];
           if (action === 'subreddit_info') return [...base, 'subreddit-info', requireString(input.subreddit, 'subreddit'), '-f', 'yaml'];
           break;
         case 'xiaohongshu':
           if (action === 'search') return [...base, 'search', requireString(input.query, 'query'), '-f', 'yaml'];
           if (action === 'read' || action === 'note') return [...base, 'note', publicUrlOrId(input), '-f', 'yaml'];
           if (action === 'comments') return [...base, 'comments', requireString(input.id, 'id'), '-f', 'yaml'];
-          if (action === 'feed') return [...base, 'feed', '-f', 'yaml'];
+          if (action === 'feed') return [...base, 'feed', '--limit', limit, '-f', 'yaml'];
           if (action === 'user') return [...base, 'user', requireString(input.user ?? input.userId, 'user'), '-f', 'yaml'];
           break;
         case 'facebook':
@@ -303,6 +332,7 @@ function rdtCandidate(): ExternalCandidate {
       switch (action) {
         case 'search': return ['search', requireString(input.query, 'query'), '--limit', limit];
         case 'read': return ['read', publicUrlOrId(input, 'id or url')];
+        case 'feed': return ['feed', '--limit', limit];
         case 'subreddit': return ['sub', requireString(input.subreddit, 'subreddit'), '--limit', limit];
         case 'popular': return ['popular', '--limit', limit];
         case 'all': return ['all', '--limit', limit];
@@ -368,6 +398,27 @@ function biliCandidate(): ExternalCandidate {
   };
 }
 
+const SECRET_PATTERNS = [
+  /Authorization:\s*(Bearer|token|Basic)\s+\S+/gi,
+  /Set-Cookie:\s*\S+/gi,
+  /Cookie:\s*\S+/gi,
+  /(TWITTER_COOKIE|REDDIT_COOKIE|XHS_COOKIE|XIAOHONGSHU_COOKIE|BILIBILI_COOKIE|XUEQIU_COOKIE)[=:]\s*[^\n\r]+/gi,
+  /(TWITTER_AUTH_TOKEN|TWITTER_CT0|BILIBILI_SESSDATA|BILIBILI_CSRF|GITHUB_TOKEN|GH_TOKEN|BRAVE_API_KEY|EXA_API_KEY|TAVILY_API_KEY|OPENCLI_TOKEN|REDDIT_CLIENT_SECRET|YOUTUBE_API_KEY|LISTENNOTES_API_KEY|PRODUCTHUNT_API_TOKEN|PATENTSVIEW_API_KEY|CRAWL4AI_API_TOKEN|DEEP_RESEARCH_API_TOKEN|SEARCH_LLM_API_TOKEN|EMBEDDING_SIDECAR_API_TOKEN|OPENAI_API_KEY|GROQ_API_KEY)[=:]\s*\S+/gi,
+  /api[Kk]ey["']?\s*[:=]\s*["']?\S+/gi,
+  /api_?key\s*[:=]\s*\S+/gi,
+];
+
+export function sanitizeExternalOutput(text: string): string {
+  let sanitized = text;
+  for (const pattern of SECRET_PATTERNS) {
+    sanitized = sanitized.replace(pattern, (match) => {
+      const sep = match.search(/[=:]\s*/);
+      return sep >= 0 ? match.slice(0, sep + 1) + '***' : '***';
+    });
+  }
+  return sanitized;
+}
+
 async function runFirstUsable(
   platform: string,
   candidates: ExternalCandidate[],
@@ -379,14 +430,20 @@ async function runFirstUsable(
   const failures: string[] = [];
 
   for (const candidate of ordered) {
-    const commandArgs = candidate.args(action, input);
+    let commandArgs: string[];
+    try {
+      commandArgs = candidate.args(action, input);
+    } catch (error) {
+      failures.push(`${candidate.name}: ${error instanceof Error ? error.message : String(error)}`);
+      continue;
+    }
     const result = await runCommand(candidate.command, commandArgs, options, COMMAND_TIMEOUT_MS);
     if (result.code === 127) {
       failures.push(`${candidate.name}: not installed (${candidate.setup})`);
       continue;
     }
-    if (result.code === 0) return { ...result, backend: candidate.name };
-    failures.push(`${candidate.name}: exit ${result.code}: ${tail(result.stderr || result.stdout)}`);
+    if (result.code === 0) return { ...result, stdout: sanitizeExternalOutput(result.stdout), stderr: sanitizeExternalOutput(result.stderr), backend: candidate.name };
+    failures.push(`${candidate.name}: exit ${result.code}: ${tail(sanitizeExternalOutput(result.stderr || result.stdout))}`);
   }
 
   throw new Error(`No usable ${platform} backend. ${failures.join('; ')}`);
@@ -400,9 +457,13 @@ async function runCommand(command: string, args: string[], options: ReachToolOpt
       env: externalEnvironment(command, options.env ?? process.env),
       stdio: ['ignore', 'pipe', 'pipe'],
     });
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeoutMs);
-    const abort = () => child.kill('SIGTERM');
-    options.signal?.addEventListener('abort', abort, { once: true });
+    let killTimer: NodeJS.Timeout | undefined;
+    const terminate = () => {
+      child.kill('SIGTERM');
+      killTimer ??= setTimeout(() => child.kill('SIGKILL'), SIGKILL_AFTER_MS);
+    };
+    const timer = setTimeout(terminate, timeoutMs);
+    options.signal?.addEventListener('abort', terminate, { once: true });
 
     child.stdout.on('data', (chunk) => {
       stdout = (stdout + String(chunk)).slice(-MAX_OUTPUT_CHARS);
@@ -412,12 +473,14 @@ async function runCommand(command: string, args: string[], options: ReachToolOpt
     });
     child.on('error', (error: NodeJS.ErrnoException) => {
       clearTimeout(timer);
-      options.signal?.removeEventListener('abort', abort);
+      if (killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener('abort', terminate);
       resolve({ code: error.code === 'ENOENT' ? 127 : 1, stdout, stderr: error.message });
     });
     child.on('close', (code) => {
       clearTimeout(timer);
-      options.signal?.removeEventListener('abort', abort);
+      if (killTimer) clearTimeout(killTimer);
+      options.signal?.removeEventListener('abort', terminate);
       resolve({ code, stdout, stderr });
     });
   });
@@ -489,19 +552,11 @@ function topicIdFromUrl(value: unknown): string | undefined {
 }
 
 async function fetchJson(url: string, signal?: AbortSignal): Promise<unknown> {
-  const response = await fetch(validatePublicHttpUrl(url), fetchInit({ 'User-Agent': USER_AGENT, Accept: 'application/json' }, signal));
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-  return response.json();
+  return boundedFetchJson(url, { 'User-Agent': USER_AGENT, Accept: 'application/json' }, signal);
 }
 
 async function fetchText(url: string, signal?: AbortSignal): Promise<string> {
-  const response = await fetch(validatePublicHttpUrl(url), fetchInit({ 'User-Agent': USER_AGENT }, signal));
-  if (!response.ok) throw new Error(`HTTP ${response.status} for ${url}`);
-  return (await response.text()).slice(0, MAX_OUTPUT_CHARS);
-}
-
-function fetchInit(headers: Record<string, string>, signal: AbortSignal | undefined): RequestInit {
-  return { headers, ...(signal ? { signal } : {}) };
+  return boundedFetchText(url, { 'User-Agent': USER_AGENT }, signal);
 }
 
 function parseFeedItems(xml: string): Array<{ title: string; url: string; summary?: string | undefined }> {
@@ -568,28 +623,6 @@ function publicUrlOrId(input: Record<string, unknown>, name = 'url or id'): stri
   return requireString(input.id, name);
 }
 
-function validatePublicHttpUrl(raw: string): string {
-  const url = new URL(raw.trim());
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Disallowed URL scheme: ${url.protocol}`);
-  const host = url.hostname.toLowerCase();
-  if (
-    host === 'localhost' ||
-    host.endsWith('.localhost') ||
-    host === '0.0.0.0' ||
-    host.startsWith('127.') ||
-    host.startsWith('10.') ||
-    host.startsWith('192.168.') ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(host) ||
-    host === '169.254.169.254' ||
-    host === '::1' ||
-    host.startsWith('fc') ||
-    host.startsWith('fd')
-  ) {
-    throw new Error(`Disallowed private or local host: ${host}`);
-  }
-  return url.href;
-}
-
 function externalEnvironment(command: string, env: Record<string, string | undefined>): Record<string, string> {
   const allowed = [
     'PATH', 'HOME', 'TMPDIR', 'TEMP', 'TMP', 'SHELL', 'LANG', 'LC_ALL', 'PYTHONIOENCODING',
@@ -600,10 +633,22 @@ function externalEnvironment(command: string, env: Record<string, string | undef
     'PATENTSVIEW_API_KEY', 'CRAWL4AI_BASE_URL', 'CRAWL4AI_API_TOKEN',
     'DEEP_RESEARCH_BASE_URL', 'DEEP_RESEARCH_WORKER_BASE_URL', 'DEEP_RESEARCH_API_TOKEN',
     'DEEP_RESEARCH_MODEL', 'DEEP_RESEARCH_WORKER_MODEL',
-    ...(command === 'twitter' ? ['TWITTER_AUTH_TOKEN', 'TWITTER_CT0'] : []),
+    ...(command === 'twitter' ? ['TWITTER_AUTH_TOKEN', 'TWITTER_CT0', 'TWITTER_COOKIE'] : []),
+    ...(command === 'rdt' ? ['REDDIT_COOKIE'] : []),
+    ...(command === 'xhs' ? ['XHS_COOKIE', 'XIAOHONGSHU_COOKIE'] : []),
+    ...(command === 'bili' ? ['BILIBILI_SESSDATA', 'BILIBILI_CSRF', 'BILIBILI_COOKIE'] : []),
     ...(command === 'opencli' ? ['OPENCLI_HOST', 'OPENCLI_PORT', 'OPENCLI_TOKEN'] : []),
   ];
-  return Object.fromEntries(allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key] as string]] : [])));
+  const base = Object.fromEntries(allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key] as string]] : [])));
+  return { ...cookieEnvironmentForCommand(command, env), ...base };
+}
+
+function cookieEnvironmentForCommand(command: string, env: Record<string, string | undefined>): Record<string, string> {
+  if (command === 'twitter') return cookieAuthEnvironment('twitter', env);
+  if (command === 'rdt') return cookieAuthEnvironment('reddit', env);
+  if (command === 'xhs') return cookieAuthEnvironment('xiaohongshu', env);
+  if (command === 'bili') return cookieAuthEnvironment('bilibili', env);
+  return {};
 }
 
 function jsonTextResult(data: unknown): BackendCallResult {
