@@ -9,7 +9,7 @@
   },
   "files": [
     "bin/",
-    "src/",
+    "src/*.ts",
     "README.md",
     "SKILL.md"
   ],
