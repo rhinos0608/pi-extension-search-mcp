@@ -11,3 +11,4 @@ dist/
 **/.pi-smartread/
 **/.pi-smartread.tags.cache/
 **/.smart-edit-undo/
+.pi-subagents/artifacts/
