@@ -4,11 +4,13 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import type { BackendCallResult } from './backend.js';
 import { callSetupTool } from './bootstrap.js';
+import { browser } from './browser-tools.js';
 import { fetchJson as boundedFetchJson, fetchText as boundedFetchText, validatePublicHttpUrl } from './http.js';
 import { cookieAuthEnvironment } from './cookie-jar.js';
 import { authForChannel } from './providers.js';
+import { dedupeBy, guardResult, jsonTextResult, textResult } from './tool-output.js';
 
-export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds';
+export type ReachToolName = 'reach_status' | 'reach_setup' | 'social' | 'video' | 'feeds' | 'media' | 'browser';
 
 interface ReachToolOptions {
   signal?: AbortSignal;
@@ -31,7 +33,7 @@ interface ExternalCandidate {
 
 interface ChannelDefinition {
   name: string;
-  family: 'social' | 'video' | 'feeds' | 'web' | 'dev' | 'research';
+  family: 'social' | 'media' | 'web' | 'dev' | 'research' | 'browser';
   description: string;
   tier: 0 | 1 | 2;
   backends: Array<{ name: string; type: 'native' | 'external'; command?: string; setup?: string }>;
@@ -46,21 +48,31 @@ const channels: ChannelDefinition[] = [
   { name: 'web', family: 'web', description: 'Public web search and page reading', tier: 0, backends: [{ name: 'native-fetch', type: 'native' }] },
   { name: 'github', family: 'dev', description: 'GitHub repositories, files, trees, search, trending', tier: 0, backends: [{ name: 'github-api', type: 'native' }] },
   { name: 'research', family: 'research', description: 'Academic, public-data, and community sources', tier: 0, backends: [{ name: 'native-public-apis', type: 'native' }] },
-  { name: 'rss', family: 'feeds', description: 'RSS and Atom feed reading', tier: 0, backends: [{ name: 'native-rss-atom', type: 'native' }] },
+  { name: 'rss', family: 'media', description: 'RSS and Atom feed reading', tier: 0, backends: [{ name: 'native-rss-atom', type: 'native' }] },
   { name: 'v2ex', family: 'social', description: 'V2EX topics, nodes, replies, and users', tier: 0, backends: [{ name: 'v2ex-public-api', type: 'native' }] },
   { name: 'twitter', family: 'social', description: 'Twitter/X tweets, search, users, and timelines', tier: 1, backends: [{ name: 'twitter-cli', type: 'external', command: 'twitter', setup: 'pipx install twitter-cli' }, { name: 'OpenCLI', type: 'external', command: 'opencli', setup: 'Install OpenCLI and login in Chrome' }] },
   { name: 'reddit', family: 'social', description: 'Reddit posts, comments, subreddits, and search', tier: 1, backends: [{ name: 'OpenCLI', type: 'external', command: 'opencli', setup: 'Install OpenCLI and login in Chrome' }, { name: 'rdt-cli', type: 'external', command: 'rdt', setup: "pipx install 'git+https://github.com/public-clis/rdt-cli.git' && rdt login" }] },
   { name: 'xiaohongshu', family: 'social', description: 'XiaoHongShu search, notes, comments, feed, and users', tier: 1, backends: [{ name: 'OpenCLI', type: 'external', command: 'opencli', setup: 'Install OpenCLI and login in Chrome' }, { name: 'xhs-cli', type: 'external', command: 'xhs', setup: 'Install xhs-cli; OpenCLI preferred for new installs' }] },
   { name: 'facebook', family: 'social', description: 'Facebook search, profiles, feed, and groups', tier: 1, backends: [{ name: 'OpenCLI', type: 'external', command: 'opencli', setup: 'Install OpenCLI and login in Chrome' }] },
   { name: 'instagram', family: 'social', description: 'Instagram user search, profiles, posts, explore, and saved', tier: 1, backends: [{ name: 'OpenCLI', type: 'external', command: 'opencli', setup: 'Install OpenCLI and login in Chrome' }] },
-  { name: 'youtube', family: 'video', description: 'YouTube search, metadata, and subtitles via yt-dlp', tier: 1, backends: [{ name: 'yt-dlp', type: 'external', command: 'yt-dlp', setup: 'pip install yt-dlp' }] },
-  { name: 'bilibili', family: 'video', description: 'Bilibili search, hot videos, details, and subtitles', tier: 1, backends: [{ name: 'bili-cli', type: 'external', command: 'bili', setup: 'Install bili-cli' }, { name: 'OpenCLI', type: 'external', command: 'opencli', setup: 'Install OpenCLI for subtitles' }] },
+  { name: 'youtube', family: 'media', description: 'YouTube search, metadata, and subtitles via yt-dlp', tier: 1, backends: [{ name: 'yt-dlp', type: 'external', command: 'yt-dlp', setup: 'pip install yt-dlp' }] },
+  { name: 'bilibili', family: 'media', description: 'Bilibili search, hot videos, details, and subtitles', tier: 1, backends: [{ name: 'bili-cli', type: 'external', command: 'bili', setup: 'Install bili-cli' }, { name: 'OpenCLI', type: 'external', command: 'opencli', setup: 'Install OpenCLI for subtitles' }] },
+  { name: 'browser', family: 'browser', description: 'Browser automation via CDP: navigate, evaluate, screenshot, click, type, scroll, tabs, cookies', tier: 0, backends: [{ name: 'cdp', type: 'native' }] },
 ];
 
 export async function callReachTool(
   name: string,
   args: Record<string, unknown>,
   options: ReachToolOptions = {},
+): Promise<BackendCallResult | undefined> {
+  const result = await dispatchReachTool(name, args, options);
+  return result ? guardResult(result, { env: options.env }) : undefined;
+}
+
+async function dispatchReachTool(
+  name: string,
+  args: Record<string, unknown>,
+  options: ReachToolOptions,
 ): Promise<BackendCallResult | undefined> {
   switch (name as ReachToolName) {
     case 'reach_status':
@@ -73,6 +85,13 @@ export async function callReachTool(
       return video(args, options);
     case 'feeds':
       return feeds(args, options);
+    case 'media':
+      if (args.platform === 'rss' || args.action === 'feed') {
+        return feeds({ url: args.url, limit: args.limit ?? 20 }, options);
+      }
+      return video(args, options);
+    case 'browser':
+      return browser(args, options);
     default:
       return undefined;
   }
@@ -157,7 +176,7 @@ async function feeds(args: Record<string, unknown>, options: ReachToolOptions): 
   const url = requireString(args.url, 'url');
   const limit = numberOrDefault(args.limit, 20);
   const xml = await fetchText(url, options.signal);
-  const items = parseFeedItems(xml).slice(0, limit);
+  const items = dedupeBy(parseFeedItems(xml), (item) => item.url || item.title).slice(0, limit);
   const text = items.length
     ? items.map((item, index) => `## ${index + 1}. ${item.title}\n${item.url}\n${item.summary ?? ''}`).join('\n\n')
     : `No feed entries found for: ${url}`;
@@ -649,14 +668,6 @@ function cookieEnvironmentForCommand(command: string, env: Record<string, string
   if (command === 'xhs') return cookieAuthEnvironment('xiaohongshu', env);
   if (command === 'bili') return cookieAuthEnvironment('bilibili', env);
   return {};
-}
-
-function jsonTextResult(data: unknown): BackendCallResult {
-  return textResult(JSON.stringify(data, null, 2), data);
-}
-
-function textResult(text: string, details: unknown): BackendCallResult {
-  return { content: [{ type: 'text', text }], details };
 }
 
 function requireString(value: unknown, name: string): string {

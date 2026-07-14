@@ -7,6 +7,7 @@ import { importCookiesFromDefaultBrowser } from './cookie-jar.js';
 import { runSetupInstall } from './installer.js';
 import { loadedConfigSummary } from './local-config.js';
 import { liveAuthSnapshot, providerSummary, PROVIDER_DESCRIPTORS, findProvider } from './providers.js';
+import { jsonTextResult } from './tool-output.js';
 
 export type SetupAction = 'auto' | 'status' | 'plan' | 'install_core' | 'install_all' | 'install_channels' | 'import_cookies' | 'login';
 
@@ -162,7 +163,7 @@ async function runInteractiveSetup(options: SetupOptions): Promise<BackendCallRe
     cookies,
     nextSteps: [
       'Use /reach-status to inspect active backends.',
-      'Use /reach-login <provider> [port] for headed browser login.',
+      'Use /reach-setup login <provider> [port] for headed browser login.',
       'Use /reach-setup status for config/auth/cookie state.',
     ],
   });
@@ -418,12 +419,4 @@ function authStatePath(env: Record<string, string | undefined>): string {
 
 function cookieStateDir(env: Record<string, string | undefined>): string {
   return join(baseStateDir(env), 'cookies');
-}
-
-function jsonTextResult(data: unknown): BackendCallResult {
-  return textResult(JSON.stringify(data, null, 2), data);
-}
-
-function textResult(text: string, details: unknown): BackendCallResult {
-  return { content: [{ type: 'text', text }], details };
 }

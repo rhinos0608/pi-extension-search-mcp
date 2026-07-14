@@ -2,6 +2,7 @@ import type { AgentToolResult, ExtensionAPI } from '@earendil-works/pi-coding-ag
 import { StringEnum } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { resultToText, type SearchBackend } from './backend.js';
+import { guardText } from './tool-output.js';
 
 const githubActions = [
   'repo',
@@ -13,7 +14,7 @@ const githubActions = [
   'code_search',
 ] as const;
 
-export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend): void {
+export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?: Record<string, string | undefined>): void {
   pi.registerTool({
     name: 'github',
     label: 'GitHub',
@@ -148,7 +149,7 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend): voi
       });
 
       return {
-        content: [{ type: 'text', text: resultToText(result) }],
+        content: [{ type: 'text', text: guardText(resultToText(result), { env }) }],
         details: result,
       };
     },

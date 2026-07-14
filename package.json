@@ -1,7 +1,7 @@
 {
   "name": "@search-mcp/pi-extension",
   "version": "0.1.0",
-  "description": "Pi extension exposing search, crawl, browse, research, and GitHub tools.",
+  "description": "Pi extension exposing web search, fetch, GitHub, social, media, and browser tools with multi-provider search, academic research, and CDP automation.",
   "type": "module",
   "license": "MIT",
   "bin": {

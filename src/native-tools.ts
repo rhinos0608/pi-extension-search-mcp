@@ -2,9 +2,10 @@ import type { BackendCallResult } from './backend.js';
 import { fetchInit, fetchJson, fetchText, safeResponseJson, safeResponseText, unsafeFetchJson, validatePublicHttpUrl } from './http.js';
 import { normalizeUrl, rrfMerge } from './fusion.js';
 import { retryWithBackoff } from './retry.js';
+import { dedupeBy, dedupeByUrl, guardResult, jsonTextResult, textResult } from './tool-output.js';
 import { callReachTool } from './reach-tools.js';
 
-type NativeToolName = 'web_search' | 'semantic_crawl' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
+type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
 
 interface NativeToolOptions {
   signal?: AbortSignal;
@@ -59,10 +60,20 @@ export async function callNativeTool(
   const reachResult = await callReachTool(name, args, options);
   if (reachResult) return reachResult;
 
+  return guardResult(await dispatchNativeTool(name, args, options), { env: options.env });
+}
+
+async function dispatchNativeTool(
+  name: string,
+  args: Record<string, unknown>,
+  options: NativeToolOptions,
+): Promise<BackendCallResult> {
   switch (name as NativeToolName) {
     case 'web_search':
       return webSearch(args, options);
     case 'semantic_crawl':
+      return semanticCrawl(args, options);
+    case 'fetch':
       return semanticCrawl(args, options);
     case 'agentic_browse':
       return agenticBrowse(args, options);
@@ -140,7 +151,7 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
   const topK = clampedNumber(args.topK, 8, 1, SEMANTIC_TOP_K_MAX);
   const maxPages = clampedNumber(args.maxPages, 10, 1, SEMANTIC_MAX_PAGES_MAX);
   const source = asRecord(args.source);
-  const urls = await semanticSourceUrls(source, query, maxPages, options.signal);
+  const urls = dedupeBy(await semanticSourceUrls(source, query, maxPages, options.signal), normalizeUrl);
   const chunks: Array<{ url: string; title: string; content: string; score: number }> = [];
 
   for (const url of urls.slice(0, maxPages)) {
@@ -154,7 +165,7 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
     }
   }
 
-  const ranked = chunks.sort((a, b) => b.score - a.score).slice(0, topK);
+  const ranked = dedupeBy(chunks, (chunk) => chunk.content).sort((a, b) => b.score - a.score).slice(0, topK);
   const text = ranked.length
     ? ranked.map((chunk, index) => `## ${index + 1}. ${chunk.title || chunk.url}\n${chunk.url}\n\n${chunk.content}`).join('\n\n')
     : `No crawl results for: ${query}`;
@@ -295,7 +306,7 @@ async function researchResults(query: string, source: string, limit: number, sig
   if (source === 'all' || source === 'hackernews') tasks.push(searchHackerNews(query, limit, signal));
   if (tasks.length === 0) tasks.push(searchDuckDuckGo(`${source} ${query}`, limit, signal));
   const settled = await Promise.allSettled(tasks);
-  return settled.flatMap((item) => (item.status === 'fulfilled' ? item.value : [])).slice(0, limit);
+  return dedupeByUrl(settled.flatMap((item) => (item.status === 'fulfilled' ? item.value : []))).slice(0, limit);
 }
 
 async function searchDuckDuckGo(query: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
@@ -543,14 +554,6 @@ function flattenDuckDuckGoTopics(value: unknown): WebResult[] {
 function formatWebResults(query: string, results: WebResult[]): string {
   if (results.length === 0) return `No web results for: ${query}`;
   return results.map((result, index) => `## ${index + 1}. ${result.title}\n${result.url}\n${result.snippet ?? ''}`).join('\n\n');
-}
-
-function jsonTextResult(data: unknown): BackendCallResult {
-  return textResult(JSON.stringify(data, null, 2), data);
-}
-
-function textResult(text: string, details: unknown): BackendCallResult {
-  return { content: [{ type: 'text', text }], details };
 }
 
 function requireString(value: unknown, name: string): string {

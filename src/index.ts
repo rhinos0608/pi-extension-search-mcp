@@ -7,6 +7,7 @@ import { registerGitHubTool } from './github.js';
 import { callSetupTool, ensureFirstStartBootstrap } from './bootstrap.js';
 import { loadSearchMcpEnvironment } from './local-config.js';
 import { PROVIDER_DESCRIPTORS } from './providers.js';
+import { guardText } from './tool-output.js';
 
 const searchCategoryNames = [
   'company',
@@ -18,6 +19,7 @@ const searchCategoryNames = [
   'personal site',
   'people',
   'financial report',
+  'research',
 ] as const;
 
 const researchSources = [
@@ -36,10 +38,9 @@ const researchSources = [
   'wikidata',
 ] as const;
 
-const reachFamilies = ['social', 'video', 'feeds', 'web', 'dev', 'research'] as const;
+const reachFamilies = ['social', 'media', 'web', 'dev', 'research', 'browser'] as const;
 const setupActions = ['auto', 'status', 'plan', 'install_core', 'install_all', 'install_channels', 'import_cookies', 'login'] as const;
 const socialPlatforms = ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook', 'instagram'] as const;
-const videoPlatforms = ['youtube', 'bilibili'] as const;
 
 export default function (pi: ExtensionAPI): void {
   const env = loadSearchMcpEnvironment(process.env);
@@ -52,92 +53,49 @@ export default function (pi: ExtensionAPI): void {
 
   pi.on('before_provider_request', (event) => normalizeProviderPayload(event.payload));
 
-  registerGitHubTool(pi, client);
+  registerGitHubTool(pi, client, env);
   registerExpansionCommands(pi, env);
-  registerExpansionTools(pi, client);
+  registerExpansionTools(pi, client, env);
 
   pi.registerTool({
     name: 'web_search',
     label: 'Web Search',
-    description: 'Search the web via search-mcp and return collated source findings.',
-    promptSnippet: 'Search the public web for current sources and citations.',
-    promptGuidelines: ['Use web_search when broad source discovery is needed before deeper retrieval.'],
+    description: 'Search the public web for current sources and citations, or academic/public-data/community sources via research category.',
+    promptSnippet: 'Search the web or academic/public-data/community sources for current evidence.',
+    promptGuidelines: [
+      'Use web_search when broad source discovery is needed before deeper retrieval.',
+      'Use category "research" for academic literature and public-data sources (arXiv, Semantic Scholar, PubMed, Wikipedia, Hacker News, Stack Overflow, ...); source/yearFrom apply only there.',
+    ],
     parameters: Type.Object({
       query: Type.String({ description: 'Search query.' }),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Maximum results, default 8.' })),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 30, description: 'Maximum results, default 8 (web) / 12 (research).' })),
       category: Type.Optional(StringEnum(searchCategoryNames)),
+      source: Type.Optional(StringEnum(researchSources)),
+      yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: 2099, description: 'Earliest publication year; research category only.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'web_search', {
-        query: params.query,
-        limit: params.limit ?? 8,
-        resultFormat: 'collated',
-        ...(params.category ? { category: params.category } : {}),
-      }, signal, 120_000);
+      const route = buildSearchRoute(params);
+      return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
   });
 
   pi.registerTool({
-    name: 'semantic_crawl',
-    label: 'Semantic Crawl',
-    description: 'Crawl a URL or web-search-derived corpus with search-mcp semantic retrieval.',
-    promptSnippet: 'Retrieve semantically relevant passages from a target URL or discovered source corpus.',
-    promptGuidelines: ['Use semantic_crawl after web_search identifies a target source or domain.'],
+    name: 'fetch',
+    label: 'Fetch',
+    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus.',
+    promptSnippet: 'Retrieve semantically relevant passages from a target URL or discovered source corpus, or get readable text of a URL.',
+    promptGuidelines: ['Use fetch after web_search identifies a target source or domain, or to read a known URL\'s relevant content.', 'Omit query and provide only url to get the readable text of a page instead of semantic chunks.'],
     parameters: Type.Object({
-      query: Type.String({ description: 'Question or retrieval query.' }),
-      url: Type.Optional(Type.String({ description: 'Specific URL to crawl. Preferred when known.' })),
+      query: Type.Optional(Type.String({ description: 'Retrieval query. Omit to get the readable text of url instead of semantic chunks.' })),
+      url: Type.Optional(Type.String({ description: 'Specific URL to crawl/fetch. Required when query is omitted.' })),
       searchQuery: Type.Optional(Type.String({ description: 'Discovery query when no URL is known.' })),
       topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Relevant chunks to return, default 8.' })),
       maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Maximum pages to crawl, default 10.' })),
+      maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Max characters in no-query readable-text mode, default 12000.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      const source = buildSemanticSource(params.url, params.searchQuery);
-
-      return callSearchMcpTool(client, 'semantic_crawl', {
-        source,
-        query: params.query,
-        topK: params.topK ?? 8,
-        maxPages: params.maxPages ?? 10,
-        maxDepth: source.type === 'url' ? 1 : 0,
-      }, signal, 300_000);
-    },
-  });
-
-  pi.registerTool({
-    name: 'browse',
-    label: 'Browse',
-    description: 'Fetch a URL and return its readable text content.',
-    promptSnippet: 'Read the content of a web page by URL.',
-    promptGuidelines: ['Use browse to read a specific URL and extract its text content.'],
-    parameters: Type.Object({
-      url: Type.String({ description: 'URL to fetch.' }),
-      maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Maximum characters to return, default 12000.' })),
-    }),
-    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'agentic_browse', buildBrowseArgs(params), signal, 120_000);
-    },
-  });
-
-  pi.registerTool({
-    name: 'research_sources',
-    label: 'Research Sources',
-    description: 'Search academic, public-data, Wikipedia, Hacker News, and Stack Overflow sources through search-mcp.',
-    promptSnippet: 'Search scholarly, technical, public-data, and community sources.',
-    promptGuidelines: ['Use research_sources when the user needs research literature, technical discussions, or public knowledge sources.'],
-    parameters: Type.Object({
-      query: Type.String({ description: 'Research query.' }),
-      source: Type.Optional(StringEnum(researchSources)),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 30, description: 'Maximum results, default 12.' })),
-      yearFrom: Type.Optional(Type.Number({ minimum: 1900, maximum: 2099, description: 'Earliest publication year.' })),
-    }),
-    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'research', {
-        action: 'academic',
-        query: params.query,
-        source: params.source ?? 'all',
-        limit: params.limit ?? 12,
-        ...(params.yearFrom ? { yearFrom: params.yearFrom } : {}),
-      }, signal, 120_000);
+      const route = buildFetchRoute(params);
+      return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
   });
 }
@@ -148,6 +106,7 @@ async function callSearchMcpTool(
   args: Record<string, unknown>,
   signal: AbortSignal | undefined,
   timeout?: number,
+  env?: Record<string, string | undefined>,
 ): Promise<AgentToolResult<unknown>> {
   const result = await client.callTool(name, args, {
     ...(signal ? { signal } : {}),
@@ -155,14 +114,14 @@ async function callSearchMcpTool(
   });
 
   return {
-    content: [{ type: 'text', text: resultToText(result) }],
+    content: [{ type: 'text', text: guardText(resultToText(result), { env }) }],
     details: result,
   };
 }
 
 function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string | undefined>): void {
   pi.registerCommand('reach-status', {
-    description: 'Inspect search extension channel/backend health. Usage: /reach-status [social|video|feeds|web|dev|research]',
+    description: 'Inspect search extension channel/backend health. Usage: /reach-status [social|media|web|dev|research|browser]',
     getArgumentCompletions: (prefix) => reachFamilies.filter((family) => family.startsWith(prefix)).map((family) => ({ value: family, label: family })),
     handler: async (args, ctx) => {
       const family = args.trim();
@@ -190,17 +149,7 @@ function registerExpansionCommands(pi: ExtensionAPI, env: Record<string, string 
     },
   });
 
-  pi.registerCommand('reach-login', {
-    description: 'Launch headed browser login for a cookie-backed provider. Usage: /reach-login <provider> [port]',
-    getArgumentCompletions: (prefix) => PROVIDER_DESCRIPTORS
-      .filter((provider) => provider.cookieDomains.length > 0 && provider.provider.startsWith(prefix))
-      .map((provider) => ({ value: provider.provider, label: provider.provider })),
-    handler: async (args, ctx) => {
-      const [provider, port] = args.trim().split(/\s+/).filter(Boolean);
-      const result = await callSetupTool({ action: 'login', ...(provider ? { provider } : {}), ...(port ? { port: Number(port) } : {}) }, { env, ...(ctx.signal ? { signal: ctx.signal } : {}) });
-      await showCommandResult(ctx, 'Reach Login', resultToText(result));
-    },
-  });
+
 }
 
 export function setupCommandParams(action: string, rest: string[]): Record<string, unknown> {
@@ -225,7 +174,7 @@ async function showCommandResult(ctx: ExtensionCommandContext, title: string, te
   ctx.ui.notify(`${title}: ${text.slice(0, 500)}`, 'info');
 }
 
-function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend): void {
+function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Record<string, string | undefined>): void {
   pi.registerTool({
     name: 'social',
     label: 'Social',
@@ -250,47 +199,141 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend): void {
       limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100 })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'social', params, signal, 180_000);
+      return callSearchMcpTool(client, 'social', params, signal, 180_000, env);
     },
   });
 
   pi.registerTool({
-    name: 'video',
-    label: 'Video',
-    description: 'Search/read video platforms and extract metadata or subtitles through ordered backends.',
-    promptSnippet: 'Use YouTube or Bilibili backends for video metadata, search, and subtitles.',
+    name: 'media',
+    label: 'Media',
+    description: 'Video platforms (YouTube/Bilibili) metadata, search, subtitles + RSS/Atom feed reading.',
+    promptSnippet: 'Search YouTube/Bilibili, get video metadata, fetch subtitles, or read RSS/Atom feeds.',
     promptGuidelines: [
-      'Use video for YouTube metadata/subtitles and Bilibili search/details/subtitles.',
-      'Do not use yt-dlp for Bilibili; bili-cli/OpenCLI backends are preferred.',
+      'Use media to search YouTube or Bilibili, get video details, or fetch subtitles.',
+      'For Bilibili, do not use yt-dlp; it uses bili-cli or OpenCLI backends.',
+      'Use media with feed action or rss platform to read an RSS/Atom URL instead of fetch, which parses structured entries.',
     ],
     parameters: Type.Object({
-      platform: Type.Optional(StringEnum(videoPlatforms)),
-      action: Type.Optional(Type.String({ description: 'search, details, transcript, hot, video, subtitle.' })),
+      platform: Type.Optional(StringEnum(['youtube','bilibili','rss'] as const)),
+      action: Type.Optional(Type.String({ description: 'search, details, transcript, hot, video, subtitle for video platforms; feed to read an RSS/Atom feed.' })),
       query: Type.Optional(Type.String()),
-      url: Type.Optional(Type.String()),
+      url: Type.Optional(Type.String({ description: 'Video URL, or the RSS/Atom feed URL for the feed action (required for feed).' })),
       id: Type.Optional(Type.String()),
       language: Type.Optional(Type.String({ description: 'Subtitle language pattern for YouTube transcript, default en.*.' })),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 50 })),
+      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Max results/entries. Feed default 20; video search default 10.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'video', params, signal, 300_000);
+      const route = buildMediaRoute(params);
+      return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
   });
 
   pi.registerTool({
-    name: 'feeds',
-    label: 'Feeds',
-    description: 'Read RSS or Atom feeds and return recent entries.',
-    promptSnippet: 'Read RSS/Atom subscriptions and summarize recent entries.',
-    promptGuidelines: ['Use feeds for RSS/Atom URLs instead of generic browse.'],
+    name: 'browser',
+    label: 'Browser',
+    description: 'Browser automation via CDP: navigate, evaluate, screenshot, click, type, scroll, tabs, cookies.',
+    promptSnippet: 'Control a browser via CDP for live page interaction, screenshots, and cookie extraction.',
+    promptGuidelines: [
+      'Requires a remote-debugging browser (Chrome with --remote-debugging-port=9222).',
+      'Respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out.',
+      'Navigation only to public http/https URLs (private/local hosts blocked).',
+      'The evaluate action runs arbitrary JavaScript in the page context. The expression is agent-authored privileged code — never interpolate untrusted user text into it; use click/type/scroll for user-supplied selectors and input instead.',
+    ],
     parameters: Type.Object({
-      url: Type.String({ description: 'RSS or Atom feed URL.' }),
-      limit: Type.Optional(Type.Number({ minimum: 1, maximum: 100, description: 'Maximum entries, default 20.' })),
+      action: Type.Optional(Type.String({ description: 'Action: status, tabs, navigate, evaluate, text, html, screenshot, click, type, scroll, close, cookies, set_cookies.' })),
+      endpoint: Type.Optional(Type.String({ description: 'CDP WebSocket endpoint URL. Falls back to BROWSER_CDP_ENDPOINT env.' })),
+      url: Type.Optional(Type.String({ description: 'URL for navigate action.' })),
+      expression: Type.Optional(Type.String({ description: 'JavaScript expression for evaluate action.' })),
+      selector: Type.Optional(Type.String({ description: 'CSS selector for click/type/scroll actions.' })),
+      text: Type.Optional(Type.String({ description: 'Text to type for type action.' })),
+      x: Type.Optional(Type.Number({ description: 'Horizontal scroll offset.' })),
+      y: Type.Optional(Type.Number({ description: 'Vertical scroll offset.' })),
+      urls: Type.Optional(Type.Array(Type.String(), { description: 'URLs for cookies action.' })),
+      cookies: Type.Optional(Type.Array(Type.Any(), { description: 'Cookies to set for set_cookies action.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
-      return callSearchMcpTool(client, 'feeds', params, signal, 120_000);
+      const { browser } = await import('./browser-tools.js');
+      const opts: { signal?: AbortSignal; env?: Record<string, string | undefined> } = { env };
+      if (signal) opts.signal = signal;
+      const result = await browser(params as Record<string, unknown>, opts);
+      return {
+        content: [{ type: 'text', text: guardText((result.content as Array<{ type: string; text: string }>)?.[0]?.text ?? String(result.details), { env }) }],
+        details: result.details,
+      };
     },
   });
+}
+
+export function buildSearchRoute(params: { query: string; category?: string; source?: string; yearFrom?: number; limit?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
+  if (params.category === 'research') {
+    return {
+      tool: 'research',
+      args: {
+        action: 'academic',
+        query: params.query,
+        source: params.source ?? 'all',
+        limit: Math.min(params.limit ?? 12, 30),
+        ...(params.yearFrom ? { yearFrom: params.yearFrom } : {}),
+      },
+      timeout: 120_000,
+    };
+  }
+  return {
+    tool: 'web_search',
+    args: {
+      query: params.query,
+      limit: Math.min(params.limit ?? 8, 20),
+      resultFormat: 'collated',
+      ...(params.category ? { category: params.category } : {}),
+    },
+    timeout: 120_000,
+  };
+}
+
+export function buildMediaRoute(params: { platform?: string; action?: string; url?: string; query?: string; id?: string; language?: string; limit?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
+  if (params.platform === 'rss' || params.action === 'feed') {
+    return {
+      tool: 'feeds',
+      args: { url: params.url, limit: params.limit ?? 20 },
+      timeout: 120_000,
+    };
+  }
+  const videoParams: Record<string, unknown> = {};
+  if (params.platform && params.platform !== 'rss') videoParams.platform = params.platform;
+  if (params.action) videoParams.action = params.action;
+  if (params.query) videoParams.query = params.query;
+  if (params.url) videoParams.url = params.url;
+  if (params.id) videoParams.id = params.id;
+  if (params.language) videoParams.language = params.language;
+  if (params.limit !== undefined) videoParams.limit = params.limit;
+  return {
+    tool: 'video',
+    args: videoParams,
+    timeout: 300_000,
+  };
+}
+
+export function buildFetchRoute(params: { query?: string; url?: string; searchQuery?: string; topK?: number; maxPages?: number; maxChars?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
+  if (!params.query?.trim()) {
+    if (!params.url?.trim()) throw new Error('url is required when query is omitted');
+    return {
+      tool: 'agentic_browse',
+      args: buildBrowseArgs({ url: params.url.trim(), ...(params.maxChars !== undefined ? { maxChars: params.maxChars } : {}) }),
+      timeout: 120_000,
+    };
+  }
+  const source = buildSemanticSource(params.url, params.searchQuery);
+  return {
+    tool: 'semantic_crawl',
+    args: {
+      source,
+      query: params.query,
+      topK: params.topK ?? 8,
+      maxPages: params.maxPages ?? 10,
+      maxDepth: source.type === 'url' ? 1 : 0,
+    },
+    timeout: 300_000,
+  };
 }
 
 export function buildBrowseArgs(params: { url: string; maxChars?: number }): Record<string, unknown> {

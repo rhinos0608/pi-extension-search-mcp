@@ -21,11 +21,11 @@ export const AUTH_DIR = '~/.pi-extension-search';
 export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
   // ── Zero-config (no auth needed) ──────────────────────────
   { provider: 'web', channel: 'web', family: 'web', envKeys: [], cookieDomains: [], loginFlow: 'none', risk: 'none', setup: 'No configuration required', description: 'Public web search and page reading' },
-  { provider: 'rss', channel: 'rss', family: 'feeds', envKeys: [], cookieDomains: [], loginFlow: 'none', risk: 'none', setup: 'No configuration required', description: 'RSS and Atom feed reading' },
+  { provider: 'rss', channel: 'rss', family: 'media', envKeys: [], cookieDomains: [], loginFlow: 'none', risk: 'none', setup: 'No configuration required', description: 'RSS and Atom feed reading' },
   { provider: 'v2ex', channel: 'v2ex', family: 'social', envKeys: [], cookieDomains: [], loginFlow: 'none', risk: 'none', setup: 'No configuration required', description: 'V2EX topics, nodes, replies, and users' },
 
   // ── API key only ──────────────────────────────────────────
-  { provider: 'youtube', channel: 'youtube', family: 'video', envKeys: ['YOUTUBE_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set YOUTUBE_API_KEY env var or install yt-dlp', description: 'YouTube search, metadata, and subtitles' },
+  { provider: 'youtube', channel: 'youtube', family: 'media', envKeys: ['YOUTUBE_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Set YOUTUBE_API_KEY env var or install yt-dlp', description: 'YouTube search, metadata, and subtitles' },
   { provider: 'brave', channel: 'search', family: 'research', envKeys: ['BRAVE_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Optional: set BRAVE_API_KEY for enhanced search', description: 'Brave Search API' },
   { provider: 'exa', channel: 'search', family: 'research', envKeys: ['EXA_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Optional: set EXA_API_KEY for semantic search', description: 'Exa (formerly Metaphor) semantic search API' },
   { provider: 'tavily', channel: 'search', family: 'research', envKeys: ['TAVILY_API_KEY'], cookieDomains: [], loginFlow: 'api_key', risk: 'low', setup: 'Optional: set TAVILY_API_KEY for AI-native search', description: 'Tavily AI search API' },
@@ -38,7 +38,7 @@ export const PROVIDER_DESCRIPTORS: ProviderDescriptor[] = [
   { provider: 'reddit', channel: 'reddit', family: 'social', envKeys: ['REDDIT_CLIENT_ID', 'REDDIT_CLIENT_SECRET', 'REDDIT_USER_AGENT'], cookieDomains: ['reddit.com'], loginFlow: 'env_var', risk: 'medium', setup: 'Set Reddit API credentials or install OpenCLI/rdt-cli', description: 'Reddit posts, comments, subreddits, and search', loginUrl: 'https://www.reddit.com/login' },
 
   // ── CLI login ─────────────────────────────────────────────
-  { provider: 'bilibili', channel: 'bilibili', family: 'video', envKeys: [], cookieDomains: ['bilibili.com'], loginFlow: 'cli_login', risk: 'low', setup: 'Install bili-cli', description: 'Bilibili search, hot videos, details, and subtitles', loginUrl: 'https://www.bilibili.com/' },
+  { provider: 'bilibili', channel: 'bilibili', family: 'media', envKeys: [], cookieDomains: ['bilibili.com'], loginFlow: 'cli_login', risk: 'low', setup: 'Install bili-cli', description: 'Bilibili search, hot videos, details, and subtitles', loginUrl: 'https://www.bilibili.com/' },
 
   // ── Browser cookie login (OpenCLI or similar) ─────────────
   { provider: 'facebook', channel: 'facebook', family: 'social', envKeys: [], cookieDomains: ['facebook.com'], loginFlow: 'browser_cookie', risk: 'medium', setup: 'Install OpenCLI and login in Chrome', description: 'Facebook search, profiles, feed, and groups', loginUrl: 'https://www.facebook.com/login' },
