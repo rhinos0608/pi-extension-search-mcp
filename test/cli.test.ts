@@ -66,7 +66,7 @@ test('runCommand supports public browse tool alias', async () => {
 });
 
 test('runCommand supports reach_status family', async () => {
-  const result = await runCommand(['call', 'reach_status', '{"family":"feeds"}'], {});
+  const result = await runCommand(['call', 'reach_status', '{"family":"media"}'], {});
 
   assert.equal(result.ok, true);
   assert.match(JSON.stringify(result.data), /native-rss-atom/);
@@ -136,7 +136,7 @@ test('runCommand reach_setup status reports live env presence', async () => {
 });
 
 test('runCommand reach_status includes auth metadata per channel', async () => {
-  const result = await runCommand(['call', 'reach_status', '{"family":"feeds"}'], { GITHUB_TOKEN: 'dummy' });
+  const result = await runCommand(['call', 'reach_status', '{"family":"media"}'], { GITHUB_TOKEN: 'dummy' });
 
   assert.equal(result.ok, true);
   const text = JSON.stringify(result.data);

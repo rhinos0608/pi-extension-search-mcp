@@ -29,7 +29,7 @@ test('CliSearchBackend child process works from a foreign cwd', async () => {
 
   try {
     process.chdir(dir);
-    const result = await backend.callTool('reach_status', { family: 'feeds' }, { timeout: 60_000 });
+    const result = await backend.callTool('reach_status', { family: 'media' }, { timeout: 60_000 });
     assert.match(resultToText(result), /native-rss-atom/);
   } finally {
     process.chdir(originalCwd);

@@ -7,6 +7,24 @@ import { callNativeTool } from '../src/native-tools.js';
 import { sanitizeExternalOutput } from '../src/reach-tools.js';
 import { writeCookieState } from '../src/cookie-jar.js';
 
+test('callNativeTool fetch alias routes to semanticCrawl', async () => {
+  await assert.rejects(
+    () => callNativeTool('fetch', {}),
+    /query is required/,
+  );
+});
+
+test('callNativeTool fetch returns same result as semantic_crawl for private URL', async () => {
+  const args = { query: 'test', source: { type: 'url', url: 'http://localhost:3000' } };
+  const fetchResult = await callNativeTool('fetch', args);
+  const crawlResult = await callNativeTool('semantic_crawl', args);
+
+  const fetchText = (fetchResult.content as Array<{ type: string; text: string }>)[0]?.text ?? '';
+  const crawlText = (crawlResult.content as Array<{ type: string; text: string }>)[0]?.text ?? '';
+  assert.equal(fetchText, crawlText);
+  assert.ok(fetchText.includes('No crawl results'));
+});
+
 test('callNativeTool rejects unsupported tools', async () => {
   await assert.rejects(
     () => callNativeTool('missing_tool', {}),
@@ -62,7 +80,7 @@ test('native browse rejects non-http URL schemes', async () => {
 });
 
 test('reach_status reports native feed channel without network', async () => {
-  const result = await callNativeTool('reach_status', { family: 'feeds' });
+  const result = await callNativeTool('reach_status', { family: 'media' });
 
   assert.match(JSON.stringify(result.details), /native-rss-atom/);
 });

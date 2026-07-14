@@ -3,24 +3,26 @@ import { test } from 'node:test';
 
 const EXPECTED_TOOL_NAMES = [
   'web_search',
-  'semantic_crawl',
-  'browse',
-  'research_sources',
+  'fetch',
   'github',
   'social',
-  'video',
-  'feeds',
+  'media',
+  'browser',
 ] as const;
 
 const EXPECTED_COMMAND_NAMES = [
   'reach-status',
   'reach-setup',
-  'reach-login',
 ] as const;
 
 const DISALLOWED_TOOL_NAMES = [
   'reach_status',
   'reach_setup',
+  'browse',
+  'semantic_crawl',
+  'video',
+  'feeds',
+  'research_sources',
 ] as const;
 
 test('import.meta.resolve("tsx") is used by CliSearchBackend subprocess', () => {
