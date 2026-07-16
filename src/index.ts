@@ -87,9 +87,9 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus.',
-    promptSnippet: 'Retrieve semantically relevant passages from a target URL or discovered source corpus, or get readable text of a URL.',
-    promptGuidelines: ['Use fetch after web_search identifies a target source or domain, or to read a known URL\'s relevant content.', 'Omit query and provide only url to get the readable text of a page instead of semantic chunks.'],
+    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus. Needs a url — compose with web_search first to discover candidate URLs, then call fetch with query for semantically packed results. Prefer query over fetching full pages: query returns only relevant passages, full-page fetches overload context. Omit query only when you need the complete readable text of a single URL.',
+    promptSnippet: 'Fetch URL content — compose with web_search first to get URLs, then call fetch with query for semantic chunks. Prefer query over full-page fetches.',
+    promptGuidelines: ['Always compose fetch with web_search first — web_search discovers candidate URLs, fetch retrieves their content.', 'Prefer fetch with query for semantically packed results; only omit query when you need the complete readable text of a single URL.', 'Full-page fetches overload context — use query mode by default.'],
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: 'Retrieval query. Omit to get the readable text of url instead of semantic chunks.' })),
       url: Type.Optional(Type.String({ description: 'Specific URL to crawl/fetch. Required when query is omitted.' })),

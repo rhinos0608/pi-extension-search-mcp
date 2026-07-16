@@ -11,7 +11,7 @@ Pi extension that gives your agent real-world reach — web search, page reading
 | `github` | Browse repos, read files, search code, discover trending projects. With an embedding sidecar, unlock `code_search` for AST-aware semantic code retrieval. |
 | `social` | Read and search Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, Instagram. |
 | `media` | YouTube and Bilibili search, metadata, subtitles. RSS/Atom feed reading. |
-| `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, evaluate. |
+| `browser` | Headless browser automation via agent-browser — navigate, click, type, screenshot, snapshot with interactive refs, structured result categories, click verification, stale-ref detection, scroll no-op detection, overlay blocker detection. |
 | `desktop` | Native desktop observation and interaction via Cua Driver (opt-in, disabled by default). |
 
 ## Quick start
@@ -73,7 +73,7 @@ export SEARXNG_BASE_URL="https://..."   # Self-hosted SearXNG
 
 ```bash
 export PI_SEARCH_WEB_BACKENDS="duckduckgo,brave,searxng"  # Ordered, first succeeds wins
-export PI_SEARCH_BROWSER_BACKEND="cdp"                     # Fall back to raw CDP
+export PI_SEARCH_BROWSER_BACKEND="cdp"                     # Deprecated: CDP fallback (no reliability checks)
 export PI_SEARCH_BROWSER_ALLOW_SENSITIVE="1"              # Enable evaluate/set_cookies
 export PI_SEARCH_DESKTOP_AUTOMATION="1"                   # Enable desktop tool
 ```
@@ -210,7 +210,7 @@ User-facing setup and status commands (not LLM tools):
 
 ## Browser automation
 
-`browser` tool provides headless browser control via agent-browser (default) or CDP fallback.
+`browser` tool provides headless browser control via **agent-browser** (core path) with reliability checks matching [pi-agent-browser-native](https://github.com/fitchmultz/pi-agent-browser-native). A legacy CDP fallback exists but is **deprecated** — use agent-browser.
 
 ### Installation
 
@@ -223,53 +223,88 @@ npm install
 
 No additional setup required — the tool works immediately.
 
-### Capabilities
+### Capability matrix
 
-`browser` supports these actions:
+#### Reliability checks (Phase 1–2, implemented)
+
+| Check | What it does | Signal |
+|-------|-------------|--------|
+| **Structured result envelope** | Every result carries `resultCategory` (success/failure), `successCategory` (inspection/completed/artifact-saved), `failureCategory` (timeout/stale-ref/dispatch-unverified/overlay-blocked/etc), and `nextActions` with exact recovery steps | `details.resultCategory`, `details.failureCategory`, `details.nextActions` |
+| **Click dispatch verification** | After clicks on `@eN` refs and `role=`/`xpath=` selectors, installs a capture-phase DOM event probe; fails the result if no click event reached the page | `details.dispatchUnverified: true` |
+| **Stale ref detection** | Tracks per-session `@eN` ref snapshots; rejects mutations on stale refs before the CLI runs | `failureCategory: 'stale-ref'`, `nextActions: [snapshot refresh]` |
+| **Scroll no-op detection** | Compares pre/post viewport position; flags when scroll had no effect | `details.scrolled: false`, `details.noop: true` |
+| **Overlay blocker detection** | Counts `[role=dialog]`/`[aria-modal]` elements before/after clicks; flags when a modal appeared | `details.overlay: { appeared: true }` |
+| **Session page state** | Per-session ref snapshot tracking, tab target tracking, invalidation on "No active page", stale update rejection via monotonic tokens | `details.refSnapshot`, `details.refSnapshotInvalidation` |
+
+#### Snapshot & input modes (Phase 3–4, implemented)
+
+| Feature | What it does |
+|---------|-------------|
+| **Interactive snapshot refs** | `snapshot` parses `@eN` refs from agent-browser output, records role/name/isContentEditable metadata per session |
+| **Compact snapshot** | `compact: true` keeps high-value roles (button, link, textbox, checkbox, radio, combobox, select, menuitem, tab, switch), drops structural divs without names |
+| **semanticAction** | Locator shorthands — `click`/`fill`/`check`/`select` with `role`/`text`/`label`/`placeholder`/`alt`/`title`/`testid` locators, compiled to agent-browser `find` commands |
+| **job** | Constrained multi-step orchestration (max 20 steps: open/click/fill/type/select/wait/assert/snapshot/screenshot), sequential execution with reliability checks per step |
+| **batch** | Raw multi-command stdin batching, per-step `batchSteps[]` result categories |
+
+#### Actions
 
 | Action | Parameters | What it does |
 |--------|-----------|------|
-| `status` | none | Check browser backend (agent-browser or cdp) and session state |
+| `status` | none | Check browser backend and session state |
 | `tabs` | none | List open browser tabs |
 | `navigate` | `url: string` | Navigate to a URL (public HTTP/HTTPS only) |
 | `text` | none | Extract visible text from the current page |
 | `html` | none | Get raw HTML of the current page |
 | `screenshot` | none | Capture a PNG screenshot of the page |
-| `click` | `selector: string` | Click an element (CSS selector) |
-| `type` | `selector: string`, `text: string` | Type text into an input field |
-| `scroll` | `x?: number`, `y?: number` | Scroll by pixel offset |
+| `snapshot` | `compact?: boolean` | Take interactive snapshot with `@eN` refs for click/fill |
+| `click` | `selector: string` | Click an element — with dispatch verification on eligible selectors |
+| `type` | `selector: string`, `text: string` | Type text into an input field, with stale-ref preflight |
+| `fill` | `selector: string`, `text: string` | Fill a form field, with stale-ref preflight |
+| `scroll` | `x?: number`, `y?: number` | Scroll by pixel offset, with no-op detection |
+| `wait` | `selector?: string`, `waitMs?: number` | Wait for selector or milliseconds |
+| `get_url` | none | Get current page URL |
+| `get_title` | none | Get current page title |
 | `close` | none | Close the current tab |
-| `cookies` | `urls?: string[]` | Read cookie metadata (name, domain, path, expiry, flags — values never exposed) |
-| `set_cookies` | `cookies: Array<{name, value?, domain?, path?, ...}>` | Set cookies for a domain (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
-| `evaluate` | `expression: string` | Run JavaScript in the page context, return result (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
+| `cookies` | `urls?: string[]` | Read cookie metadata (values never exposed) |
+| `set_cookies` | `cookies: Array<...>` | Set cookies (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
+| `evaluate` | `expression: string` | Run JavaScript in page context (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
+| `semanticAction` | `{ action, locator, value, ... }` | Click/fill/check/select with role/text/label locators |
+| `job` | `{ steps: [...] }` | Multi-step orchestration with per-step reliability |
+| `batch` | `commands: string[][]` | Raw multi-command batching (requires sensitive flag) |
 
 ### Examples
 
 ```bash
-# Navigate and take a screenshot
+# Navigate and snapshot with interactive refs
 browser({ action: "navigate", url: "https://example.com" })
-browser({ action: "screenshot" })
+browser({ action: "snapshot" })
+# Returns @e1, @e2, @e3... refs for follow-up clicks
+browser({ action: "click", selector: "@e2" })
+
+# Semantic action — click by role/name
+browser({ semanticAction: { action: "click", locator: "role", role: "button", value: "Submit" } })
+
+# Multi-step job with reliability
+browser({ job: { steps: [
+  { kind: "open", url: "https://example.com" },
+  { kind: "fill", selector: "@e1", text: "hello" },
+  { kind: "click", selector: "@e2" },
+  { kind: "snapshot" }
+] } })
 
 # Extract text
 browser({ action: "text" })
 
-# Interact with form
-browser({ action: "click", selector: "#search-input" })
-browser({ action: "type", selector: "#search-input", text: "query" })
-browser({ action: "click", selector: "button[type=submit]" })
-
 # Evaluate JavaScript
 browser({ action: "evaluate", expression: "document.title" })
-
-# Read cookies
-browser({ action: "cookies", urls: ["https://example.com"] })
 ```
 
 ### Backend selection
 
-Defaults to agent-browser. For CDP fallback:
+agent-browser is the default and recommended backend. **CDP is deprecated** — it lacks reliability checks, snapshot refs, and session management. Only use it for legacy integrations that cannot install agent-browser.
 
 ```bash
+# Deprecated — use agent-browser instead
 export PI_SEARCH_BROWSER_BACKEND="cdp"
 export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"
 ```
@@ -277,11 +312,10 @@ export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"
 ### Security
 
 - Agent-browser uses owned isolated sessions with strict public-domain navigation
-- `evaluate` and `set_cookies` are disabled by default; enable with `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`
+- `evaluate`, `set_cookies`, and `batch` are disabled by default; enable with `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`
 - Cookies return metadata only (name, domain, path, expiry, flags) — values are never exposed
-- CDP endpoints are restricted to loopback (localhost/127.0.0.1), ports 1024–65535
+- Error messages sanitized: token/password/secret/authorization patterns stripped (≤2000 chars)
 - Security enforcement is external through containerization and other extensions
-- DNS preflight is defense-in-depth; high-assurance deployments need OS-level egress controls
 
 ## Desktop automation
 
