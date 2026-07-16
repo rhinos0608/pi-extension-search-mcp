@@ -1,6 +1,6 @@
 {
   "name": "pi-atlas",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Pi extension — web search, fetch, GitHub, social, media, browser, and desktop tools with multi-provider search, academic research, and agent-browser automation.",
   "type": "module",
   "license": "MIT",
