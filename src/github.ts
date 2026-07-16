@@ -55,7 +55,10 @@ export function registerGitHubTool(pi: ExtensionAPI, client: SearchBackend, env?
 
       // -- file --
       path: Type.Optional(Type.String({
-        description: 'File or directory path within the repo.',
+        description: 'File or directory path within the repo. Use `paths` for multiple files.',
+      })),
+      paths: Type.Optional(Type.Array(Type.String(), {
+        description: 'Multiple file paths to read in parallel. Returns { files: { [path]: content } }. Mutually exclusive with `path`.',
       })),
       branch: Type.Optional(Type.String({
         description: 'Git ref (branch, tag, or commit SHA).',

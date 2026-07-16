@@ -239,7 +239,8 @@ async function githubRepo(args: Record<string, unknown>, env: Record<string, str
   let readme: unknown = null;
   if (includeReadme) {
     try {
-      readme = await githubJson(`https://api.github.com/repos/${repo.owner}/${repo.repo}/readme`, env, signal);
+      const rawReadme = await githubJson(`https://api.github.com/repos/${repo.owner}/${repo.repo}/readme`, env, signal);
+      readme = decodeGitHubContent(rawReadme, args.raw);
     } catch {
       readme = null;
     }
@@ -247,14 +248,76 @@ async function githubRepo(args: Record<string, unknown>, env: Record<string, str
   return jsonTextResult({ metadata, readme });
 }
 
+function decodeGitHubContent(data: unknown, raw?: unknown): unknown {
+  if (raw === false) return data;
+  if (!isGitHubFileObject(data)) return data;
+  const decoded = Buffer.from(data.content, 'base64').toString('utf8');
+  return { ...data, content: decoded, encoding: 'utf8' };
+}
+
+function isGitHubFileObject(data: unknown): data is Record<string, unknown> & { content: string; encoding: string } {
+  return (
+    typeof data === 'object' &&
+    data !== null &&
+    'content' in data &&
+    'encoding' in data &&
+    typeof (data as Record<string, unknown>).content === 'string' &&
+    typeof (data as Record<string, unknown>).encoding === 'string' &&
+    (data as Record<string, unknown>).encoding === 'base64'
+  );
+}
+
 async function githubFile(args: Record<string, unknown>, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<BackendCallResult> {
   const repo = parseRepoArgs(args);
-  const path = typeof args.path === 'string' ? args.path.replace(/^\/+/, '') : '';
   const branch = typeof args.branch === 'string' ? args.branch : undefined;
+  const paths = normalizePaths(args);
+
+  if (paths.length > 1) {
+    const results = await fetchMultipleFiles(repo, paths, branch, env, signal, args.raw);
+    return jsonTextResult(results);
+  }
+
+  const path = paths[0] ?? '';
   const url = new URL(`https://api.github.com/repos/${repo.owner}/${repo.repo}/contents/${path}`);
   if (branch) url.searchParams.set('ref', branch);
   const data = await githubJson(url.href, env, signal);
-  return jsonTextResult(data);
+  return jsonTextResult(decodeGitHubContent(data, args.raw));
+}
+
+function normalizePaths(args: Record<string, unknown>): string[] {
+  if (Array.isArray(args.paths) && args.paths.length > 0) {
+    return args.paths.filter((p): p is string => typeof p === 'string').map((p) => p.replace(/^\/+/, ''));
+  }
+  if (typeof args.path === 'string') return [args.path.replace(/^\/+/, '')];
+  return [];
+}
+
+async function fetchMultipleFiles(
+  repo: { owner: string; repo: string },
+  paths: string[],
+  branch: string | undefined,
+  env: Record<string, string | undefined>,
+  signal: AbortSignal | undefined,
+  raw: unknown,
+): Promise<{ files: Record<string, unknown> }> {
+  const files: Record<string, unknown> = {};
+  const settled = await Promise.allSettled(
+    paths.map(async (path) => {
+      const url = new URL(`https://api.github.com/repos/${repo.owner}/${repo.repo}/contents/${path}`);
+      if (branch) url.searchParams.set('ref', branch);
+      return { path, data: await githubJson(url.href, env, signal) };
+    }),
+  );
+  for (let i = 0; i < settled.length; i++) {
+    const result = settled[i]!;
+    const fileKey = paths[i] ?? 'unknown';
+    if (result.status === 'fulfilled') {
+      files[fileKey] = decodeGitHubContent(result.value.data, raw);
+    } else {
+      files[fileKey] = { error: result.reason instanceof Error ? result.reason.message : String(result.reason) };
+    }
+  }
+  return { files };
 }
 
 async function githubTree(args: Record<string, unknown>, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<BackendCallResult> {
