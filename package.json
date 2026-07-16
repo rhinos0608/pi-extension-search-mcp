@@ -1,9 +1,12 @@
 {
-  "name": "@search-mcp/pi-extension",
+  "name": "pi-atlas",
   "version": "0.1.0",
-  "description": "Pi extension exposing web search, fetch, GitHub, social, media, and browser tools with multi-provider search, academic research, and CDP automation.",
+  "description": "Pi extension — web search, fetch, GitHub, social, media, browser, and desktop tools with multi-provider search, academic research, and agent-browser automation.",
   "type": "module",
   "license": "MIT",
+  "engines": {
+    "node": ">=24.0.0"
+  },
   "bin": {
     "pi-extension-search": "./bin/pi-extension-search.mjs"
   },
@@ -21,6 +24,7 @@
   "dependencies": {
     "@earendil-works/pi-ai": "^0.79.10",
     "@modelcontextprotocol/sdk": "^1.29.0",
+    "agent-browser": "0.32.0",
     "tsx": "^4.21.0",
     "typebox": "^1.3.2"
   },
