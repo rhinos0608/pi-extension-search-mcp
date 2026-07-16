@@ -1,0 +1,3 @@
+import assert from 'node:assert/strict'; import {test} from 'node:test'; import {buildCuaEnvironment,CuaClient} from '../src/cua-client.js';
+test('Cua environment strips secrets and proxies',()=>{const e=buildCuaEnvironment({PATH:'/bin',HOME:'/home',API_KEY:'x',HTTP_PROXY:'x',NODE_OPTIONS:'x',DISPLAY:':0'},'linux');assert.equal(e.PATH,'/bin');assert.equal(e.DISPLAY,':0');assert.equal(e.API_KEY,undefined);assert.equal(e.HTTP_PROXY,undefined);assert.equal(e.NODE_OPTIONS,undefined);});
+test('static mapping rejects dynamic tools',async()=>{const c=new CuaClient({command:'x',args:[],env:{},stderr:'pipe'});await assert.rejects(c.callTool('launch_app',{}),/ACTION_DENIED/);});

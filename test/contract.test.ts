@@ -8,6 +8,7 @@ const EXPECTED_TOOL_NAMES = [
   'social',
   'media',
   'browser',
+  'desktop',
 ] as const;
 
 const EXPECTED_COMMAND_NAMES = [
@@ -23,6 +24,11 @@ const DISALLOWED_TOOL_NAMES = [
   'video',
   'feeds',
   'research_sources',
+  'cua',
+  'cua_driver',
+  'computer_use_click',
+  'computer_use_type',
+  'computer_use_screenshot',
 ] as const;
 
 test('import.meta.resolve("tsx") is used by CliSearchBackend subprocess', () => {

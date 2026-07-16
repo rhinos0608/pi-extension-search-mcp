@@ -236,14 +236,15 @@ test('cdpScreenshot returns base64', async () => {
 
 // ── browser action dispatch tests ──
 
-test('browser action dispatch: status (no connection)', async () => {
-  const result = await browser({ action: 'status', endpoint: 'ws://127.0.0.1:9222' }, { env: {} });
-  const text = JSON.stringify(result.details);
-  assert.match(text, /"endpoint"/);
-  assert.match(text, /"browserAutomationEnabled":true/);
+test('browser action dispatch: status (agent-browser default)', async () => {
+  const result = await browser({ action: 'status' }, { env: {} });
+  const details = result.details as Record<string, unknown>;
+  assert.equal(details.backend, 'agent-browser');
+  assert.ok(typeof details.version === 'string');
+  assert.ok(typeof details.executable === 'string');
 });
 
-test('browser action dispatch: tabs (mocked WS)', async () => {
+test('browser action dispatch: tabs (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -251,7 +252,7 @@ test('browser action dispatch: tabs (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'tabs', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'tabs', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     const details = result.details as Array<Record<string, unknown>>;
     assert.ok(Array.isArray(details));
     assert.equal(details.length, 1);
@@ -262,7 +263,7 @@ test('browser action dispatch: tabs (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: navigate (mocked WS)', async () => {
+test('browser action dispatch: navigate (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -290,7 +291,7 @@ test('browser action dispatch: navigate (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = NavWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'navigate', url: 'https://example.com', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'navigate', url: 'https://example.com', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.ok(result.details != null);
   } finally {
     globalThis.fetch = savedFetch;
@@ -298,7 +299,7 @@ test('browser action dispatch: navigate (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: evaluate (mocked WS)', async () => {
+test('browser action dispatch: evaluate (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -326,7 +327,7 @@ test('browser action dispatch: evaluate (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = EvalWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'evaluate', expression: '1+1', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'evaluate', expression: '1+1', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp', PI_SEARCH_BROWSER_ALLOW_SENSITIVE: '1' } });
     assert.equal(result.details, 42);
   } finally {
     globalThis.fetch = savedFetch;
@@ -341,7 +342,7 @@ test('browser unknown action throws', async () => {
 
   try {
     await assert.rejects(
-      () => browser({ action: 'nonexistent', endpoint: 'ws://127.0.0.1:9222' }),
+      () => browser({ action: 'nonexistent', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } }),
       /Unsupported browser action/,
     );
   } finally {
@@ -357,21 +358,21 @@ test('browser respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out', async () => {
   assert.match(JSON.stringify(result.details), /disabled/);
 });
 
-test('browser requires endpoint', async () => {
+test('browser requires endpoint (CDP backend)', async () => {
   await assert.rejects(
-    () => browser({}),
+    () => browser({}, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } }),
     /CDP endpoint is required/,
   );
 });
 
-test('browser navigate rejects non-http URLs', async () => {
+test('browser navigate rejects non-http URLs (CDP backend)', async () => {
   const restore = mockFetch();
   const savedWs = globalThis.WebSocket;
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWs as unknown as typeof WebSocket;
 
   try {
     await assert.rejects(
-      () => browser({ action: 'navigate', url: 'ftp://example.com', endpoint: 'ws://127.0.0.1:9222' }),
+      () => browser({ action: 'navigate', url: 'ftp://example.com', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } }),
       /Disallowed URL scheme/,
     );
   } finally {
@@ -380,14 +381,14 @@ test('browser navigate rejects non-http URLs', async () => {
   }
 });
 
-test('browser click requires selector', async () => {
+test('browser click requires selector (CDP backend)', async () => {
   const restore = mockFetch();
   const savedWs = globalThis.WebSocket;
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWs as unknown as typeof WebSocket;
 
   try {
     await assert.rejects(
-      () => browser({ action: 'click', endpoint: 'ws://127.0.0.1:9222' }),
+      () => browser({ action: 'click', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } }),
       /selector is required/,
     );
   } finally {
@@ -396,14 +397,14 @@ test('browser click requires selector', async () => {
   }
 });
 
-test('browser type requires selector and text', async () => {
+test('browser type requires selector and text (CDP backend)', async () => {
   const restore = mockFetch();
   const savedWs = globalThis.WebSocket;
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWs as unknown as typeof WebSocket;
 
   try {
     await assert.rejects(
-      () => browser({ action: 'type', endpoint: 'ws://127.0.0.1:9222' }),
+      () => browser({ action: 'type', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } }),
       /selector is required/,
     );
   } finally {
@@ -440,7 +441,7 @@ test('browser scroll uses defaults', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = ScrollWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'scroll', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'scroll', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.ok(result.content !== undefined);
   } finally {
     globalThis.fetch = savedFetch;
@@ -448,7 +449,7 @@ test('browser scroll uses defaults', async () => {
   }
 });
 
-test('browser action dispatch: text (mocked WS)', async () => {
+test('browser action dispatch: text (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -476,7 +477,7 @@ test('browser action dispatch: text (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = TextWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'text', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'text', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.equal(result.details, 'Hello World');
   } finally {
     globalThis.fetch = savedFetch;
@@ -484,7 +485,7 @@ test('browser action dispatch: text (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: html (mocked WS)', async () => {
+test('browser action dispatch: html (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -512,7 +513,7 @@ test('browser action dispatch: html (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = HtmlWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'html', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'html', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.equal(result.details, '<html><body>hi</body></html>');
   } finally {
     globalThis.fetch = savedFetch;
@@ -520,7 +521,7 @@ test('browser action dispatch: html (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: screenshot (mocked WS)', async () => {
+test('browser action dispatch: screenshot (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -548,7 +549,7 @@ test('browser action dispatch: screenshot (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = ScreenWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'screenshot', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'screenshot', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.equal(result.details, 'base64png');
   } finally {
     globalThis.fetch = savedFetch;
@@ -556,7 +557,7 @@ test('browser action dispatch: screenshot (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: click (mocked WS)', async () => {
+test('browser action dispatch: click (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -584,7 +585,7 @@ test('browser action dispatch: click (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = ClickWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'click', selector: '#btn', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'click', selector: '#btn', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.ok(result.content !== undefined);
   } finally {
     globalThis.fetch = savedFetch;
@@ -592,7 +593,7 @@ test('browser action dispatch: click (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: type (mocked WS)', async () => {
+test('browser action dispatch: type (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -620,7 +621,7 @@ test('browser action dispatch: type (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = TypeWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'type', selector: '#input', text: 'hello', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'type', selector: '#input', text: 'hello', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.ok(result.content !== undefined);
   } finally {
     globalThis.fetch = savedFetch;
@@ -628,7 +629,7 @@ test('browser action dispatch: type (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: close (mocked WS)', async () => {
+test('browser action dispatch: close (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -656,7 +657,7 @@ test('browser action dispatch: close (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = CloseWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'close', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'close', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     assert.ok(result.content !== undefined);
   } finally {
     globalThis.fetch = savedFetch;
@@ -664,7 +665,7 @@ test('browser action dispatch: close (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: cookies (mocked WS)', async () => {
+test('browser action dispatch: cookies (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -692,7 +693,7 @@ test('browser action dispatch: cookies (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = CookiesWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'cookies', endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'cookies', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } });
     const details = result.details as Array<Record<string, unknown>>;
     assert.ok(Array.isArray(details));
     assert.equal(details.length, 1);
@@ -703,7 +704,7 @@ test('browser action dispatch: cookies (mocked WS)', async () => {
   }
 });
 
-test('browser action dispatch: set_cookies (mocked WS)', async () => {
+test('browser action dispatch: set_cookies (mocked WS, CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -731,7 +732,7 @@ test('browser action dispatch: set_cookies (mocked WS)', async () => {
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = SetCookiesWs as unknown as typeof WebSocket;
 
   try {
-    const result = await browser({ action: 'set_cookies', cookies: [{ name: 'sess', value: 'abc', domain: '.example.com' }], endpoint: 'ws://127.0.0.1:9222' });
+    const result = await browser({ action: 'set_cookies', cookies: [{ name: 'sess', value: 'abc', domain: '.example.com' }], endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp', PI_SEARCH_BROWSER_ALLOW_SENSITIVE: '1' } });
     assert.ok(result.content !== undefined);
   } finally {
     globalThis.fetch = savedFetch;
@@ -741,14 +742,14 @@ test('browser action dispatch: set_cookies (mocked WS)', async () => {
 
 // ── validation tests ──
 
-test('browser type requires text', async () => {
+test('browser type requires text (CDP backend)', async () => {
   const restore = mockFetch();
   const savedWs = globalThis.WebSocket;
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWs as unknown as typeof WebSocket;
 
   try {
     await assert.rejects(
-      () => browser({ action: 'type', selector: '#x', endpoint: 'ws://127.0.0.1:9222' }),
+      () => browser({ action: 'type', selector: '#x', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } }),
       /text is required/,
     );
   } finally {
@@ -757,15 +758,15 @@ test('browser type requires text', async () => {
   }
 });
 
-test('browser set_cookies rejects non-array', async () => {
+test('browser set_cookies rejects non-array (CDP backend)', async () => {
   const restore = mockFetch();
   const savedWs = globalThis.WebSocket;
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWs as unknown as typeof WebSocket;
 
   try {
     await assert.rejects(
-      () => browser({ action: 'set_cookies', cookies: 'notarray', endpoint: 'ws://127.0.0.1:9222' }),
-      /must be an array/,
+      () => browser({ action: 'set_cookies', cookies: 'notarray', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp', PI_SEARCH_BROWSER_ALLOW_SENSITIVE: '1' } }),
+      /cookies is required and must be an array/,
     );
   } finally {
     restore();
@@ -773,15 +774,15 @@ test('browser set_cookies rejects non-array', async () => {
   }
 });
 
-test('browser set_cookies rejects cookie without name', async () => {
+test('browser set_cookies rejects cookie without name (CDP backend)', async () => {
   const restore = mockFetch();
   const savedWs = globalThis.WebSocket;
   (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = MockWs as unknown as typeof WebSocket;
 
   try {
     await assert.rejects(
-      () => browser({ action: 'set_cookies', cookies: [{ value: 'x' }], endpoint: 'ws://127.0.0.1:9222' }),
-      /non-empty string name/,
+      () => browser({ action: 'set_cookies', cookies: [{ value: 'x' }], endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp', PI_SEARCH_BROWSER_ALLOW_SENSITIVE: '1' } }),
+      /each cookie must be an object with a non-empty string name/,
     );
   } finally {
     restore();
@@ -789,7 +790,7 @@ test('browser set_cookies rejects cookie without name', async () => {
   }
 });
 
-test('openCdpSession closes WebSocket on setup failure', async () => {
+test('openCdpSession closes WebSocket on setup failure (CDP backend)', async () => {
   const savedFetch = globalThis.fetch;
   const savedWs = globalThis.WebSocket;
 
@@ -821,7 +822,7 @@ test('openCdpSession closes WebSocket on setup failure', async () => {
 
   try {
     await assert.rejects(
-      () => browser({ action: 'tabs', endpoint: 'ws://127.0.0.1:9222' }),
+      () => browser({ action: 'tabs', endpoint: 'ws://127.0.0.1:9222' }, { env: { PI_SEARCH_BROWSER_BACKEND: 'cdp' } }),
       /CDP did not return a target id/,
     );
     assert.ok(closeCalled, 'WebSocket must be closed on setup failure');

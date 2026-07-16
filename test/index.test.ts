@@ -240,9 +240,9 @@ test('browser tool registration: no maxChars param, browse action rejected', asy
   const properties = (params as Record<string, unknown>).properties as Record<string, unknown> | undefined;
   assert.equal(properties?.maxChars, undefined, 'browser tool should not have maxChars param');
 
-  // (ii) execute with browse action rejects; error must not contain 'read'
-  await assert.rejects(
-    () => capturedTool!.execute('call-1', { action: 'browse', url: 'https://example.com', endpoint: 'ws://127.0.0.1:1' }, undefined),
-    (err: Error) => !err.message.includes('read'),
-  );
+  // (ii) execute with browse action returns error result (validation returns result, not throw)
+  const result = await capturedTool!.execute('call-1', { action: 'browse', url: 'https://example.com', endpoint: 'ws://127.0.0.1:1' }, undefined);
+  const resultText = JSON.stringify(result);
+  assert.ok(!resultText.includes('read'), 'browse action error should not mention read');
+  assert.ok(resultText.includes('Unsupported') || resultText.includes('error'), 'browse action should be rejected');
 });
