@@ -1,0 +1,35 @@
+export const DESKTOP_ACTIONS = ['status','list_apps','list_windows','observe_window','wait','click','type_text','press_key','scroll'] as const;
+export type DesktopAction = typeof DESKTOP_ACTIONS[number];
+export type MutationAction = 'click'|'type_text'|'press_key'|'scroll';
+export const UPSTREAM_TOOLS = ['health_report','list_apps','list_windows','get_window_state','click','type_text','press_key','scroll'] as const;
+export type UpstreamTool = typeof UPSTREAM_TOOLS[number];
+export type DesktopErrorCode = 'DESKTOP_DISABLED'|'ACTION_DENIED'|'CONFIRMATION_REQUIRED'|'STALE_OBSERVATION'|'TARGET_MISMATCH'|'OUTCOME_UNKNOWN'|'INVALID_REQUEST'|'DRIVER_UNAVAILABLE';
+export interface DesktopRequest { action: DesktopAction; pid?: number; windowId?: string; stateId?: string; includeScreenshot?: boolean; predicate?: { text?: string; role?: string }; text?: string; key?: string; x?: number; y?: number; deltaX?: number; deltaY?: number; timeoutMs?: number; }
+export interface Observation { stateId:string; pid:number; windowId:string; generation:number; expiresAt:number; data: unknown; }
+export interface DesktopResult { action: DesktopAction; stateId?: string; data?: unknown; details?: unknown; capability?: Capability; }
+export interface Capability { status: 'tested'|'upstream_reported'|'degraded'|'unsupported'|'unverified'; version?: string; platform?: string; }
+export const MAX_TEXT_LENGTH=10000; export const MAX_AX_NODES=1000; export const MAX_AX_DEPTH=32; export const MAX_SCREENSHOT_BYTES=10_000_000; export const MAX_DIMENSION=10_000;
+export function isMutation(action: DesktopAction): action is MutationAction { return action==='click'||action==='type_text'||action==='press_key'||action==='scroll'; }
+export function validateDesktopRequest(raw: Record<string, unknown>): DesktopRequest {
+  const allowed = new Set(['action','pid','windowId','stateId','includeScreenshot','predicate','text','key','x','y','deltaX','deltaY','timeoutMs']);
+  for (const key of Object.keys(raw)) if (!allowed.has(key)) throw new Error(`INVALID_REQUEST: unknown field ${key}`);
+  const action = raw.action ?? 'status';
+  if (typeof action !== 'string' || !(DESKTOP_ACTIONS as readonly string[]).includes(action)) throw new Error(`INVALID_REQUEST: unsupported action ${String(action)}`);
+  const req: DesktopRequest = { action: action as DesktopAction };
+  if (raw.pid !== undefined && (!Number.isInteger(raw.pid)||Number(raw.pid)<=0)) throw new Error('INVALID_REQUEST: pid must be positive integer');
+  if (typeof raw.pid==='number') req.pid=raw.pid;
+  for (const key of ['windowId','stateId','text','key'] as const) if (raw[key]!==undefined) { if(typeof raw[key]!=='string'||(key==='text'&&raw[key].length>MAX_TEXT_LENGTH)) throw new Error(`INVALID_REQUEST: invalid ${key}`); req[key]=raw[key] as never; }
+  if (raw.includeScreenshot!==undefined) { if(typeof raw.includeScreenshot!=='boolean') throw new Error('INVALID_REQUEST: includeScreenshot must be boolean'); req.includeScreenshot=raw.includeScreenshot; }
+  if (raw.predicate!==undefined) { if(typeof raw.predicate!=='object'||raw.predicate===null) throw new Error('INVALID_REQUEST: predicate must be object'); const p=raw.predicate as Record<string,unknown>; req.predicate={...(typeof p.text==='string'?{text:p.text}:{}),...(typeof p.role==='string'?{role:p.role}:{})}; }
+  for (const key of ['x','y','deltaX','deltaY','timeoutMs'] as const) if(raw[key]!==undefined) { if(typeof raw[key]!=='number'||!Number.isFinite(raw[key])) throw new Error(`INVALID_REQUEST: invalid ${key}`); req[key]=raw[key] as never; }
+  if (req.timeoutMs!==undefined && (req.timeoutMs<0||req.timeoutMs>60000)) throw new Error('INVALID_REQUEST: timeout exceeds 60000ms');
+  return req;
+}
+export function resourceKey(pid:number, windowId:string):string { return `desktop:${pid}:${windowId}`; }
+export function timeoutFor(action:DesktopAction, requested?:number):number { const max=action==='observe_window'||action==='status'||action==='list_apps'||action==='list_windows'?15000:action==='wait'?30000:10000; return Math.min(max, Math.max(1, requested??max)); }
+export class ObservationStore {
+ private readonly entries=new Map<string,Observation>(); private readonly latest=new Map<string,number>(); private generation=0;
+ issue(pid:number,windowId:string,data:unknown,ttlMs=120000):Observation { const now=Date.now(); const resource=resourceKey(pid,windowId); const observation=Object.freeze({stateId:crypto.randomUUID(),pid,windowId,generation:++this.generation,expiresAt:now+ttlMs,data:Object.freeze(data)}); this.latest.set(resource,observation.generation); this.entries.set(observation.stateId,observation); while(this.entries.size>128) this.entries.delete(this.entries.keys().next().value!); return observation; }
+ get(stateId:string,pid:number,windowId:string):Observation { const value=this.entries.get(stateId); if(!value||value.expiresAt<=Date.now()) throw new Error('STALE_OBSERVATION: observation expired or missing'); if(value.pid!==pid||value.windowId!==windowId) throw new Error('TARGET_MISMATCH: observation target differs'); if(this.latest.get(resourceKey(pid,windowId))!==value.generation) throw new Error('STALE_OBSERVATION: newer observation exists'); return value; }
+ clear():void { this.entries.clear(); }
+}
