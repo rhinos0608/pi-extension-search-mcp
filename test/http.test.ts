@@ -2,12 +2,16 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { safeResponseText, validatePublicHttpUrl } from '../src/http.js';
 
-test('validatePublicHttpUrl blocks private IPs without blocking public hostnames that start with fc/fd', () => {
+test('validatePublicHttpUrl accepts http/https and rejects non-http schemes only', () => {
   assert.equal(validatePublicHttpUrl('https://fdns.google/path'), 'https://fdns.google/path');
   assert.equal(validatePublicHttpUrl('https://fccdn.example/path'), 'https://fccdn.example/path');
-  assert.throws(() => validatePublicHttpUrl('http://[fd00::1]/'), /Disallowed private or local host/);
-  assert.throws(() => validatePublicHttpUrl('http://[fc00::1]/'), /Disallowed private or local host/);
-  assert.throws(() => validatePublicHttpUrl('http://metadata.google.internal/'), /Disallowed private or local host/);
+  // Private/local hosts now pass — containerization handles network containment
+  assert.equal(validatePublicHttpUrl('http://[fd00::1]/'), 'http://[fd00::1]/');
+  assert.equal(validatePublicHttpUrl('http://[fc00::1]/'), 'http://[fc00::1]/');
+  assert.equal(validatePublicHttpUrl('http://metadata.google.internal/'), 'http://metadata.google.internal/');
+  assert.equal(validatePublicHttpUrl('http://localhost:3000/'), 'http://localhost:3000/');
+  assert.throws(() => validatePublicHttpUrl('ftp://example.com'), /scheme/);
+  assert.throws(() => validatePublicHttpUrl('file:///etc/passwd'), /scheme/);
 });
 
 test('safeResponseText rejects content-length over cap', async () => {

@@ -4,9 +4,6 @@ const DEFAULT_MAX_RESPONSE_BYTES = 1_000_000;
 export function validatePublicHttpUrl(raw: string): string {
   const url = new URL(raw.trim());
   if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new Error(`Disallowed URL scheme: ${url.protocol}`);
-  const host = url.hostname.toLowerCase();
-  const normalizedHost = host.replace(/^\[|\]$/g, '');
-  if (isBlockedHostname(normalizedHost)) throw new Error(`Disallowed private or local host: ${host}`);
   return url.href;
 }
 
@@ -88,35 +85,4 @@ function composeSignal(signal: AbortSignal | undefined, timeoutMs: number): Abor
   return signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 }
 
-function isBlockedHostname(host: string): boolean {
-  if (host === 'localhost' || host.endsWith('.localhost') || host === 'metadata' || host === 'metadata.google.internal' || host === 'metadata.azure.com') return true;
-  if (host === '::1' || /^f[cd][0-9a-f]*:/.test(host) || /^fe[89ab][0-9a-f]:/.test(host)) return true;
-  if (host.startsWith('::ffff:')) return isPrivateIPv4(host.slice(7)) || isPrivateMappedHexIPv4(host.slice(7));
-  return isPrivateIPv4(host);
-}
 
-function isPrivateIPv4(host: string): boolean {
-  const parts = host.split('.').map((part) => Number.parseInt(part, 10));
-  if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
-  const [a, b] = parts as [number, number, number, number];
-  return (
-    a === 0 ||
-    a === 10 ||
-    a === 127 ||
-    (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168) ||
-    (a === 100 && b >= 64 && b <= 127) ||
-    (a === 169 && b === 254)
-  );
-}
-
-function isPrivateMappedHexIPv4(value: string): boolean {
-  const parts = value.split(':');
-  if (parts.length !== 2) return false;
-  const [highRaw, lowRaw] = parts;
-  if (highRaw === undefined || lowRaw === undefined) return false;
-  const high = Number.parseInt(highRaw, 16);
-  const low = Number.parseInt(lowRaw, 16);
-  if (!Number.isInteger(high) || !Number.isInteger(low)) return false;
-  return isPrivateIPv4([(high >> 8) & 0xff, high & 0xff, (low >> 8) & 0xff, low & 0xff].join('.'));
-}
