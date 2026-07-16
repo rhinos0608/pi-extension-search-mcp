@@ -4,6 +4,12 @@ import { normalizeUrl, rrfMerge } from './fusion.js';
 import { retryWithBackoff } from './retry.js';
 import { dedupeBy, dedupeByUrl, guardResult, jsonTextResult, textResult } from './tool-output.js';
 import { callReachTool } from './reach-tools.js';
+import { BM25Index } from './bm25.js';
+import { chunkText as chunkTextSmart } from './chunker.js';
+import { VectorIndex } from './vector-index.js';
+import { EmbeddingClient } from './embedding-client.js';
+import { SidecarManager } from './sidecar-manager.js';
+import { ScraplingBridge } from './scrapling-bridge.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
 
@@ -151,26 +157,132 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
   const topK = clampedNumber(args.topK, 8, 1, SEMANTIC_TOP_K_MAX);
   const maxPages = clampedNumber(args.maxPages, 10, 1, SEMANTIC_MAX_PAGES_MAX);
   const source = asRecord(args.source);
-  const urls = dedupeBy(await semanticSourceUrls(source, query, maxPages, options.signal), normalizeUrl);
-  const chunks: Array<{ url: string; title: string; content: string; score: number }> = [];
+  const urls = dedupeBy(await semanticSourceUrls(source, query, maxPages, options.signal, options.env), normalizeUrl);
 
-  for (const url of urls.slice(0, maxPages)) {
-    try {
-      const page = await fetchReadablePage(url, options.signal);
-      for (const content of chunkText(page.content)) {
-        chunks.push({ url: page.url, title: page.title, content, score: scoreText(content, query) });
+  const bm25Index = new BM25Index();
+  const indexedChunks: Array<{ id: string; url: string; title: string; content: string }> = [];
+  let chunkCounter = 0;
+
+  // Scrapling bridge for JS-rendered/Cloudflare pages (auto-detect)
+  let bridge: ScraplingBridge | undefined;
+  try {
+    bridge = new ScraplingBridge({
+      fetcher: 'stealthy',
+      solveCloudflare: true,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.env?.PI_SEARCH_SCRAPLING_PROXY ? { proxy: options.env.PI_SEARCH_SCRAPLING_PROXY } : {}),
+    });
+    const health = await bridge.health();
+    if (!health.available) {
+      await bridge.close();
+      bridge = undefined;
+    }
+  } catch {
+    if (bridge) await bridge.close();
+    bridge = undefined;
+  }
+
+  try {
+    for (const url of urls.slice(0, maxPages)) {
+      try {
+        const page = await fetchReadablePage(url, options.signal, bridge);
+        for (const chunk of chunkTextSmart(page.content)) {
+          const id = String(chunkCounter++);
+          bm25Index.add(id, chunk.text);
+          indexedChunks.push({ id, url: page.url, title: page.title, content: chunk.text });
+        }
+      } catch {
+        // Ignore individual crawl failures; search/crawl tools should return partial evidence.
       }
-    } catch {
-      // Ignore individual crawl failures; search/crawl tools should return partial evidence.
+    }
+  } finally {
+    if (bridge) await bridge.close();
+  }
+
+  // Embedding pipeline (optional, degrades gracefully)
+  let vectorIndex: VectorIndex | null = null;
+  let embeddingClient: EmbeddingClient | null = null;
+  const embeddingEnv = options.env ?? process.env;
+  const embeddingEnabled = (embeddingEnv.PI_SEARCH_EMBEDDING_ENABLED ?? '1') !== '0';
+  const externalSidecarUrl = embeddingEnv.EMBEDDING_SIDECAR_BASE_URL;
+
+  if (embeddingEnabled) {
+    try {
+      if (externalSidecarUrl) {
+        // External sidecar already running — use it directly
+        embeddingClient = new EmbeddingClient({ baseUrl: externalSidecarUrl });
+        await embeddingClient.health();
+      } else {
+        // Try spawning local sidecar
+        const sidecar = new SidecarManager();
+        await sidecar.ensureRunning();
+        embeddingClient = new EmbeddingClient({ baseUrl: sidecar.getBaseUrl() });
+      }
+      vectorIndex = new VectorIndex();
+
+      // Embed all chunks
+      const texts = indexedChunks.map(c => c.content);
+      const vectors = await embeddingClient.embedBatch(texts);
+      for (let i = 0; i < indexedChunks.length; i++) {
+        vectorIndex.add(indexedChunks[i]!.id, vectors[i]!);
+      }
+    } catch (err) {
+      // Graceful degradation: embedding unavailable, use BM25 only
+      console.warn(`Embedding unavailable, falling back to BM25 only: ${err instanceof Error ? err.message : String(err)}`);
+      vectorIndex = null;
+      embeddingClient = null;
     }
   }
 
-  const ranked = dedupeBy(chunks, (chunk) => chunk.content).sort((a, b) => b.score - a.score).slice(0, topK);
-  const text = ranked.length
-    ? ranked.map((chunk, index) => `## ${index + 1}. ${chunk.title || chunk.url}\n${chunk.url}\n\n${chunk.content}`).join('\n\n')
+  let resultChunks: Array<{ id: string; url: string; title: string; content: string; score: number }> = [];
+  if (vectorIndex && embeddingClient) {
+    try {
+      // Hybrid: BM25 + embedding with RRF fusion
+      const queryVec = await embeddingClient.embed(query);
+      const bm25Results = bm25Index.search(query, topK * 2);
+      const vecResults = vectorIndex.search(queryVec, topK * 2);
+
+      const bm25Mapped = bm25Results.map(r => ({ id: r.id, score: r.score }));
+      const vecMapped = vecResults.map(r => ({ id: r.id, score: r.score }));
+
+      const fused = rrfMerge([bm25Mapped, vecMapped], { keyFn: (item: { id: string }) => item.id });
+
+      resultChunks = fused
+        .map(f => {
+          const info = indexedChunks.find(c => c.id === f.item.id);
+          return info ? { ...info, score: f.rrfScore } : null;
+        })
+        .filter((x): x is NonNullable<typeof x> => x != null)
+        .slice(0, topK);
+    } catch (err) {
+      console.warn(`Query embedding failed, using BM25 only: ${err instanceof Error ? err.message : String(err)}`);
+      const ranked = bm25Index.search(query, topK);
+      resultChunks = ranked
+        .map(r => {
+          const info = indexedChunks.find(c => c.id === r.id);
+          return info ? { ...info, score: r.score } : null;
+        })
+        .filter((x): x is NonNullable<typeof x> => x != null)
+        .slice(0, topK);
+    }
+  } else {
+    // BM25 only
+    const ranked = bm25Index.search(query, topK);
+    resultChunks = ranked
+      .map(r => {
+        const info = indexedChunks.find(c => c.id === r.id);
+        return info ? { ...info, score: r.score } : null;
+      })
+      .filter((x): x is NonNullable<typeof x> => x != null)
+      .slice(0, topK);
+  }
+
+  const text = resultChunks.length
+    ? resultChunks.map((chunk, index) => `## ${index + 1}. ${chunk.title || chunk.url}\n${chunk.url}\n\n${chunk.content}`).join('\n\n')
     : `No crawl results for: ${query}`;
 
-  return textResult(text, { query, results: ranked });
+  const method = vectorIndex ? 'bm25+embedding+rrf' : 'bm25';
+  return textResult(text, { query, results: resultChunks, ranking: { method, documentCount: bm25Index.stats().documentCount } });
 }
 
 async function agenticBrowse(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
@@ -181,16 +293,31 @@ async function agenticBrowse(args: Record<string, unknown>, options: NativeToolO
 
   const url = requireString(args.url, 'url');
   const maxChars = numberOrDefault(args.maxChars, 12000);
-  const page = await fetchReadablePage(url, options.signal);
-  const content = page.content.slice(0, maxChars);
 
-  return textResult(content, {
-    url: page.url,
-    title: page.title,
-    content,
-    wordCount: wordCount(content),
-    truncated: page.content.length > maxChars,
-  });
+  // Try Scrapling bridge if available (auto-detect)
+  let bridge: ScraplingBridge | undefined;
+  try {
+    bridge = new ScraplingBridge({
+      fetcher: 'stealthy',
+      solveCloudflare: true,
+      ...(options.signal ? { signal: options.signal } : {}),
+      ...(options.env?.PI_SEARCH_SCRAPLING_PROXY ? { proxy: options.env.PI_SEARCH_SCRAPLING_PROXY } : {}),
+    });
+  } catch { /* use fallback */ }
+
+  try {
+    const page = await fetchReadablePage(url, options.signal, bridge);
+    const content = page.content.slice(0, maxChars);
+    return textResult(content, {
+      url: page.url,
+      title: page.title,
+      content,
+      wordCount: wordCount(content),
+      truncated: page.content.length > maxChars,
+    });
+  } finally {
+    if (bridge) await bridge.close();
+  }
 }
 
 async function research(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
@@ -354,11 +481,38 @@ async function githubTrending(args: Record<string, unknown>, signal?: AbortSigna
   return jsonTextResult({ since, results });
 }
 
-async function semanticSourceUrls(source: Record<string, unknown>, query: string, maxPages: number, signal?: AbortSignal): Promise<string[]> {
+async function semanticSourceUrls(source: Record<string, unknown>, query: string, maxPages: number, signal?: AbortSignal, env?: Record<string, string | undefined>): Promise<string[]> {
   if (source.type === 'url' && typeof source.url === 'string') return [source.url];
   const searchQuery = typeof source.query === 'string' ? source.query : query;
-  const results = await searchDuckDuckGo(searchQuery, maxPages, signal);
-  return results.map((result) => result.url).filter(Boolean);
+
+  // Use all configured backends (same logic as webSearch)
+  const effectiveEnv = env ?? process.env;
+  const requested = parseBackendOverride(effectiveEnv.PI_SEARCH_WEB_BACKENDS ?? effectiveEnv.SEARCH_WEB_BACKENDS);
+  const candidates = requested.length
+    ? SEARCH_BACKENDS.filter((backend) => requested.includes(backend.name))
+    : SEARCH_BACKENDS;
+  const backends = candidates.filter((backend) => backend.configured(effectiveEnv));
+
+  // Query all configured backends in parallel
+  const settled = await Promise.allSettled(backends.map(async (backend) => {
+    const results = await backend.search(searchQuery, maxPages, effectiveEnv, signal);
+    return { backend: backend.name, results };
+  }));
+
+  // Collect rankings and RRF-fuse
+  const rankings: WebResult[][] = [];
+  settled.forEach((item) => {
+    if (item.status === 'fulfilled' && item.value.results.length > 0) rankings.push(item.value.results);
+  });
+
+  if (rankings.length === 0) {
+    // Fallback: if no backends configured/succeeded, try DuckDuckGo directly
+    const ddg = await searchDuckDuckGo(searchQuery, maxPages, signal);
+    return ddg.map((r) => r.url).filter(Boolean);
+  }
+
+  const fused = rrfMerge(rankings, { keyFn: (result) => normalizeUrl(result.url) });
+  return fused.map(({ item }) => item.url).filter(Boolean).slice(0, maxPages);
 }
 
 async function researchResults(query: string, source: string, limit: number, signal?: AbortSignal): Promise<WebResult[]> {
@@ -544,8 +698,20 @@ async function searchHackerNews(query: string, limit: number, signal?: AbortSign
   }));
 }
 
-async function fetchReadablePage(rawUrl: string, signal?: AbortSignal): Promise<{ url: string; title: string; content: string }> {
+async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: ScraplingBridge): Promise<{ url: string; title: string; content: string }> {
   const url = validatePublicHttpUrl(rawUrl);
+
+  // Try Scrapling bridge first (if provided and enabled)
+  if (bridge) {
+    try {
+      const result = await bridge.fetch(url);
+      return { url: result.url, title: result.title || '', content: result.content };
+    } catch {
+      // Fall through to plain fetch
+    }
+  }
+
+  // Fallback: plain HTTP fetch
   const html = await fetchText(url, signal);
   const title = cleanText((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').trim());
   return { url, title, content: stripHtml(html) };
@@ -582,16 +748,9 @@ function cleanText(text: string): string {
     .trim();
 }
 
-function chunkText(text: string): string[] {
-  const chunks: string[] = [];
-  for (let index = 0; index < text.length; index += 2000) chunks.push(text.slice(index, index + 2000));
-  return chunks;
-}
 
-function scoreText(text: string, query: string): number {
-  const lower = text.toLowerCase();
-  return query.toLowerCase().split(/\W+/).filter(Boolean).reduce((score, term) => score + (lower.includes(term) ? 1 : 0), 0);
-}
+
+
 
 function decodeDuckDuckGoUrl(raw: string): string {
   const decoded = raw.replace(/&amp;/g, '&');
