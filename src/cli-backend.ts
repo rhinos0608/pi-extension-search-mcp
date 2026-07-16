@@ -176,6 +176,12 @@ export function buildCliEnvironment(env: Record<string, string | undefined>): Re
     'PI_SEARCH_COOKIE_BROWSER',
     'PI_SEARCH_COOKIE_STALE_MS',
     'PI_SEARCH_STATE_DIR',
+    'PI_SEARCH_SCRAPLING_PROXY',
+    'PI_SEARCH_EMBEDDING_ENABLED',
+    'PI_SEARCH_EMBEDDING_MODEL',
+    'PI_SEARCH_EMBEDDING_DIMENSIONS',
+    'PI_SEARCH_EMBEDDING_PORT',
+    'SIDER_DEVICE',
   ];
   return Object.fromEntries(
     allowed.flatMap((key) => (typeof env[key] === 'string' ? [[key, env[key]]] : [])),

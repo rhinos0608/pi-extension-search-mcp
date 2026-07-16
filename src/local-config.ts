@@ -42,6 +42,12 @@ const mappings: Array<[string, string]> = [
   ['browser.proxyServer', 'BROWSER_PROXY_SERVER'],
   ['browser.cdpEndpoint', 'BROWSER_CDP_ENDPOINT'],
   ['browser.profileDir', 'BROWSER_PROFILE_DIR'],
+  ['scrapling.proxy', 'PI_SEARCH_SCRAPLING_PROXY'],
+  ['embedding.enabled', 'PI_SEARCH_EMBEDDING_ENABLED'],
+  ['embedding.model', 'PI_SEARCH_EMBEDDING_MODEL'],
+  ['embedding.dimensions', 'PI_SEARCH_EMBEDDING_DIMENSIONS'],
+  ['embedding.port', 'PI_SEARCH_EMBEDDING_PORT'],
+  ['sidecar.device', 'SIDER_DEVICE'],
 ];
 
 export function loadSearchMcpEnvironment(env: Record<string, string | undefined>): Record<string, string | undefined> {
