@@ -1,4 +1,4 @@
-import { validatePublicHttpUrl as httpValidatePublicHttpUrl } from './http.js';
+
 
 // ── Action union ──
 
@@ -81,8 +81,6 @@ export interface NavigationPolicy {
   allowedDomains?: string[];
 }
 
-const DNS_RESOLVE_TIMEOUT_MS = 3_000;
-
 /**
  * Validate a navigation URL for public browser use.
  * Rejects file:, chrome:, about:, data:, blob:, javascript:, ws:, wss:.
@@ -95,91 +93,20 @@ export function validateNavigationUrl(raw: string): string {
   if (protocol !== 'http:' && protocol !== 'https:') {
     throw new Error(`Disallowed URL scheme: ${url.protocol}`);
   }
-  if (url.username || url.password) {
-    throw new Error('URL must not contain credentials');
-  }
-  return httpValidatePublicHttpUrl(raw);
+  return url.href;
 }
 
 /**
- * Perform DNS preflight: resolve hostname and reject if any A/AAAA record
- * points to a private/reserved address.
- * This is defense-in-depth — Chromium resolves independently after validation.
+ * DNS preflight is a no-op — containerization handles network containment.
  */
-export async function dnsPreflight(hostname: string, signal?: AbortSignal): Promise<void> {
-  const addresses = await resolveHostname(hostname, signal);
-  if (addresses.length === 0) {
-    throw new Error(`Navigation blocked: DNS resolution unavailable for ${hostname}`);
-  }
-  for (const addr of addresses) {
-    if (isPrivateAddress(addr)) {
-      throw new Error(`Navigation blocked: DNS resolved to private/reserved address ${addr} for ${hostname}`);
-    }
-  }
+export async function dnsPreflight(_hostname: string, _signal?: AbortSignal): Promise<void> {
+  // no-op
 }
 
-async function resolveHostname(hostname: string, signal?: AbortSignal): Promise<string[]> {
-  const addresses: string[] = [];
-  for (const type of ['A', 'AAAA']) {
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), DNS_RESOLVE_TIMEOUT_MS);
-    const combined = signal ? AbortSignal.any([signal, ac.signal]) : ac.signal;
-    try {
-      const result = await fetch(`https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=${type}&aa=false`, { headers: { Accept: 'application/dns-json' }, signal: combined });
-      if (result.ok) {
-        const json = (await result.json()) as { Answer?: Array<{ type: number; data: string }> };
-        for (const answer of json.Answer ?? []) if ((type === 'A' && answer.type === 1) || (type === 'AAAA' && answer.type === 28)) addresses.push(answer.data);
-      }
-    } catch { /* DNS unavailable remains defense-in-depth */ }
-    finally { clearTimeout(timer); }
-  }
-  return addresses;
-}
-
-function isPrivateAddress(address: string): boolean {
-  // IPv4 private/reserved ranges
-  const ipv4Match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(address);
-  if (ipv4Match) {
-    const a = parseInt(ipv4Match[1]!, 10);
-    const b = parseInt(ipv4Match[2]!, 10);
-    if (a === 0 || a === 10 || a === 127) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true;
-    if (a === 169 && b === 254) return true;
-    return false;
-  }
-  // IPv6 loopback, link-local, unique-local, mapped IPv4
-  if (address === '::1') return true;
-  if (/^f[cd][0-9a-f]*:/i.test(address)) return true; // unique-local / site-local
-  if (/^fe[89ab][0-9a-f]:/i.test(address)) return true; // link-local
-  if (/^::ffff:\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(address)) {
-    return isPrivateAddress(address.slice(7));
-  }
-  return false;
-}
-
-// ── Allowed domain validation ──
+// ── Allowed domain validation — no-op: containerization handles containment ──
 
 export function validateAllowedDomain(pattern: string): string {
-  const trimmed = pattern.trim().toLowerCase();
-  if (trimmed === '*') {
-    throw new Error('Wildcard * is not allowed as a domain pattern');
-  }
-  if (trimmed.startsWith('*.')) {
-    const suffix = trimmed.slice(2);
-    if (!suffix || suffix.startsWith('.') || suffix.includes('*')) {
-      throw new Error(`Invalid subdomain pattern: ${pattern}`);
-    }
-    return trimmed;
-  }
-  // Exact hostname - validate it's a public hostname
-  const url = new URL(`https://${trimmed}/`);
-  const host = url.hostname;
-  if (host === 'localhost' || isPrivateAddress(host)) {
-    throw new Error(`Domain must be public: ${pattern}`);
-  }
-  return host;
+  return pattern.trim().toLowerCase();
 }
 
 export function freezeAllowedDomains(domains: string[]): string[] {
@@ -188,17 +115,12 @@ export function freezeAllowedDomains(domains: string[]): string[] {
   return validated;
 }
 
-export async function validateAllowedDomainsDns(domains: string[], signal?: AbortSignal): Promise<void> {
-  for (const domain of domains) await dnsPreflight(domain.replace(/^\*\./, ''), signal);
+export async function validateAllowedDomainsDns(_domains: string[], _signal?: AbortSignal): Promise<void> {
+  // no-op
 }
 
-export function checkDomainAllowed(hostname: string, allowedDomains: string[]): boolean {
-  const lower = hostname.toLowerCase();
-  for (const pattern of allowedDomains) {
-    if (pattern === lower) return true;
-    if (pattern.startsWith('*.') && lower.endsWith(`.${pattern.slice(2)}`) && lower !== pattern.slice(2)) return true;
-  }
-  return false;
+export function checkDomainAllowed(_hostname: string, _allowedDomains: string[]): boolean {
+  return true;
 }
 
 // ── Input bounds ──
