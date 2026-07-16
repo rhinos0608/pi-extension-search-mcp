@@ -8,6 +8,8 @@ import { callSetupTool, ensureFirstStartBootstrap } from './bootstrap.js';
 import { loadSearchMcpEnvironment } from './local-config.js';
 import { PROVIDER_DESCRIPTORS } from './providers.js';
 import { guardText } from './tool-output.js';
+import { DesktopService } from './desktop-tools.js';
+import { closeBrowserSession } from './browser-tools.js';
 
 const searchCategoryNames = [
   'company',
@@ -45,10 +47,13 @@ const socialPlatforms = ['twitter', 'reddit', 'v2ex', 'xiaohongshu', 'facebook',
 export default function (pi: ExtensionAPI): void {
   const env = loadSearchMcpEnvironment(process.env);
   const client = createSearchBackend(env);
+  const desktop = new DesktopService();
   void ensureFirstStartBootstrap(env);
 
   pi.on('session_shutdown', () => {
     void client.close();
+    void desktop.close();
+    void closeBrowserSession();
   });
 
   pi.on('before_provider_request', (event) => normalizeProviderPayload(event.payload));
@@ -97,6 +102,15 @@ export default function (pi: ExtensionAPI): void {
       const route = buildFetchRoute(params);
       return callSearchMcpTool(client, route.tool, route.args, signal, route.timeout, env);
     },
+  });
+
+  pi.registerTool({
+    name: 'desktop', label: 'Desktop',
+    description: 'Bounded native desktop observation and interaction through manually installed Cua Driver. Disabled by default; security is external.',
+    promptSnippet: 'Use desktop only after explicit opt-in; observe target window before mutations.',
+    promptGuidelines: ['Desktop disabled unless PI_SEARCH_DESKTOP_AUTOMATION=1.', 'AX trees and screenshots may expose PII or credentials.', 'Mutations require fresh stateId and are never retried after dispatch.'],
+    parameters: Type.Object({ action: Type.Optional(Type.String()), pid: Type.Optional(Type.Number()), windowId: Type.Optional(Type.String()), stateId: Type.Optional(Type.String()), includeScreenshot: Type.Optional(Type.Boolean()), predicate: Type.Optional(Type.Object({ text: Type.Optional(Type.String()), role: Type.Optional(Type.String()) })), text: Type.Optional(Type.String()), key: Type.Optional(Type.String()), x: Type.Optional(Type.Number()), y: Type.Optional(Type.Number()), deltaX: Type.Optional(Type.Number()), deltaY: Type.Optional(Type.Number()), timeoutMs: Type.Optional(Type.Number()) }),
+    async execute(_toolCallId, params, signal) { return await desktop.execute(params as Record<string, unknown>, signal) as never; },
   });
 }
 
@@ -231,16 +245,16 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
   pi.registerTool({
     name: 'browser',
     label: 'Browser',
-    description: 'Browser automation via CDP: navigate, evaluate, screenshot, click, type, scroll, tabs, cookies.',
+    description: 'Closed browser automation via agent-browser: navigate, snapshot, fill, wait, get URL/title, screenshot, click, type, scroll, tabs, metadata-only cookies. Explicit cdp rollback supported.',
     promptSnippet: 'Control a browser via CDP for live page interaction, screenshots, and cookie extraction.',
     promptGuidelines: [
-      'Requires a remote-debugging browser (Chrome with --remote-debugging-port=9222).',
+      'Uses agent-browser backend by default; set PI_SEARCH_BROWSER_BACKEND=cdp for explicit loopback CDP rollback.',
       'Respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out.',
       'Navigation only to public http/https URLs (private/local hosts blocked).',
-      'The evaluate action runs arbitrary JavaScript in the page context. The expression is agent-authored privileged code — never interpolate untrusted user text into it; use click/type/scroll for user-supplied selectors and input instead.',
+      'evaluate and set_cookies are disabled by default by policy; security enforcement is external through containerization and other extensions. cookies returns metadata only.',
     ],
     parameters: Type.Object({
-      action: Type.Optional(Type.String({ description: 'Action: status, tabs, navigate, evaluate, text, html, screenshot, click, type, scroll, close, cookies, set_cookies.' })),
+      action: Type.Optional(Type.String({ description: 'Action: status, tabs, navigate, evaluate, text, html, screenshot, click, type, scroll, close, cookies, set_cookies, snapshot, fill, wait, get_url, get_title.' })),
       endpoint: Type.Optional(Type.String({ description: 'CDP WebSocket endpoint URL. Falls back to BROWSER_CDP_ENDPOINT env.' })),
       url: Type.Optional(Type.String({ description: 'URL for navigate action.' })),
       expression: Type.Optional(Type.String({ description: 'JavaScript expression for evaluate action.' })),
@@ -249,15 +263,21 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
       x: Type.Optional(Type.Number({ description: 'Horizontal scroll offset.' })),
       y: Type.Optional(Type.Number({ description: 'Vertical scroll offset.' })),
       urls: Type.Optional(Type.Array(Type.String(), { description: 'URLs for cookies action.' })),
-      cookies: Type.Optional(Type.Array(Type.Any(), { description: 'Cookies to set for set_cookies action.' })),
+      cookies: Type.Optional(Type.Array(Type.Any(), { description: 'Cookie metadata/payload for set_cookies; values never returned.' })),
+      allowedDomains: Type.Optional(Type.Array(Type.String(), { description: 'Explicit public hostnames or *.subdomain patterns for owned session containment.' })),
+      waitMs: Type.Optional(Type.Number({ minimum: 0, maximum: 120000, description: 'Wait duration in milliseconds.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const { browser } = await import('./browser-tools.js');
       const opts: { signal?: AbortSignal; env?: Record<string, string | undefined> } = { env };
       if (signal) opts.signal = signal;
       const result = await browser(params as Record<string, unknown>, opts);
+      // Preserve full content array (may include image items)
+      const content = Array.isArray(result.content) && result.content.length > 0
+        ? result.content
+        : [{ type: 'text', text: guardText(String(result.details), { env }) }];
       return {
-        content: [{ type: 'text', text: guardText((result.content as Array<{ type: string; text: string }>)?.[0]?.text ?? String(result.details), { env }) }],
+        content,
         details: result.details,
       };
     },

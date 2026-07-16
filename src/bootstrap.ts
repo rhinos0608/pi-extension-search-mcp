@@ -142,7 +142,7 @@ async function setupStatus(env?: Record<string, string | undefined>): Promise<Ba
       'Default-browser cookie import is local-only, limited to registered cookie-consuming CLIs, and can be disabled with PI_SEARCH_AUTO_COOKIES=off or PI_SEARCH_BROWSER_AUTOMATION=0.',
       'macOS may show a Keychain prompt when default-browser cookies are imported.',
       'Use /reach-setup import_cookies <provider> [endpoint] with an endpoint to import via loopback CDP instead.',
-      'Use /reach-setup login <provider> [port] to launch an isolated login browser via CDP automation.',
+      'Use /reach-setup login <provider> [port] for isolated setup login; setup remains legacy CDP during migration and custom login port is deprecated on agent-browser path.',
       'Saved storageState files are session secrets and are forwarded as compatible env vars for known CLIs; browser-session backends may still need their own login state.',
     ],
   });
@@ -163,7 +163,7 @@ async function runInteractiveSetup(options: SetupOptions): Promise<BackendCallRe
     cookies,
     nextSteps: [
       'Use /reach-status to inspect active backends.',
-      'Use /reach-setup login <provider> [port] for headed browser login.',
+      'Use /reach-setup login <provider> [port] for headed setup login (legacy CDP boundary during migration).',
       'Use /reach-setup status for config/auth/cookie state.',
     ],
   });
@@ -184,7 +184,7 @@ function setupPlan(env?: Record<string, string | undefined>): BackendCallResult 
   return jsonTextResult({
     platforms: platformPlan,
     providers,
-    note: 'Install actions execute local installer commands when allowed. import_cookies without endpoint imports from the default browser; import_cookies with endpoint uses loopback CDP.',
+    note: 'Install actions execute local installer commands when allowed. Browser automation defaults to agent-browser; import_cookies without endpoint imports from default browser, with endpoint uses loopback CDP. Setup login remains separate legacy CDP during migration.'
   });
 }
 

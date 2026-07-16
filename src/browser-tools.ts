@@ -17,8 +17,56 @@ import {
 } from './cdp.js'
 import { validatePublicHttpUrl } from './http.js'
 import { textResult as guardedTextResult } from './tool-output.js'
+import { AgentBrowserAdapter } from './agent-browser.js'
+import { extractCookieMetadata, validateLegacyLoopbackEndpoint } from './browser-policy.js'
 
 export type BrowserAction = 'status' | 'tabs' | 'navigate' | 'evaluate' | 'text' | 'html' | 'screenshot' | 'click' | 'type' | 'scroll' | 'close' | 'cookies' | 'set_cookies'
+
+// ── Backend selection ──
+
+export type BrowserBackend = 'agent-browser' | 'cdp'
+
+export function resolveBrowserBackend(env?: Record<string, string | undefined>): BrowserBackend {
+  const raw = env?.PI_SEARCH_BROWSER_BACKEND?.trim().toLowerCase()
+  if (raw === 'cdp') return 'cdp'
+  return 'agent-browser'
+}
+
+// ── Persistent adapter ──
+
+let _adapter: AgentBrowserAdapter | null = null
+
+function getAdapter(env?: Record<string, string | undefined>): AgentBrowserAdapter {
+  if (!_adapter) {
+    _adapter = new AgentBrowserAdapter({ env })
+  }
+  return _adapter
+}
+
+export async function closeBrowserSession(): Promise<void> {
+  if (_adapter) {
+    const a = _adapter
+    _adapter = null
+    await a.close()
+  }
+}
+
+// ── Sensitive action gate ──
+
+function isSensitiveActionAllowed(env?: Record<string, string | undefined>): boolean {
+  return env?.PI_SEARCH_BROWSER_ALLOW_SENSITIVE === '1'
+}
+
+// ── CDP endpoint ──
+
+function getCdpEndpoint(args: Record<string, unknown>, env: Record<string, string | undefined>): string | undefined {
+  const endpoint = (typeof args.endpoint === 'string' && args.endpoint.trim())
+    ? args.endpoint.trim()
+    : (env.BROWSER_CDP_ENDPOINT?.trim())
+  return endpoint || undefined
+}
+
+// ── Main entry point ──
 
 export async function browser(
   args: Record<string, unknown>,
@@ -30,22 +78,54 @@ export async function browser(
     return textResult({ ok: false, message: 'Browser automation disabled by PI_SEARCH_BROWSER_AUTOMATION. Set it to 1 or unset to enable.' })
   }
 
-  const endpoint = (typeof args.endpoint === 'string' && args.endpoint.trim())
-    ? args.endpoint.trim()
-    : (env.BROWSER_CDP_ENDPOINT?.trim())
+  const backend = resolveBrowserBackend(env)
+
+  if (backend === 'cdp') {
+    return legacyCdpBrowser(args, options)
+  }
+
+  return agentBrowserRoute(args, options)
+}
+
+// ── Agent-browser route ──
+
+async function agentBrowserRoute(
+  args: Record<string, unknown>,
+  options: { signal?: AbortSignal; env?: Record<string, string | undefined> },
+): Promise<BackendCallResult> {
+  const env = options.env ?? process.env
+  const adapter = getAdapter(env)
+  return adapter.execute(args, { env, ...(options.signal ? { signal: options.signal } : {}) })
+}
+
+// ── Legacy CDP route (rollback path) ──
+
+async function legacyCdpBrowser(
+  args: Record<string, unknown>,
+  options: { signal?: AbortSignal; env?: Record<string, string | undefined> },
+): Promise<BackendCallResult> {
+  const env = options.env ?? process.env
+  const endpoint = getCdpEndpoint(args, env)
 
   if (!endpoint) {
     throw new Error('CDP endpoint is required. Set BROWSER_CDP_ENDPOINT env or pass endpoint param.')
   }
 
+  validateLegacyLoopbackEndpoint(endpoint)
   const action = typeof args.action === 'string' ? args.action : 'status'
 
   if (action === 'status') {
     return textResult({
       endpoint,
       browserAutomationEnabled: true,
+      backend: 'cdp',
       websocketAvailable: typeof globalThis.WebSocket === 'function',
     })
+  }
+
+  // Sensitive action gate applies to CDP path too
+  if ((action === 'evaluate' || action === 'set_cookies') && !isSensitiveActionAllowed(env)) {
+    throw new Error(`${action} disabled by policy. Set PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1 to enable.`)
   }
 
   const signal = options.signal
@@ -87,7 +167,10 @@ export async function browser(
         return textResult(await cdpCloseTarget(session))
       case 'cookies': {
         const urls = Array.isArray(args.urls) ? args.urls.filter((u): u is string => typeof u === 'string') : undefined
-        return textResult(await cdpGetCookiesRaw(session, urls))
+        const rawCookies = await cdpGetCookiesRaw(session, urls)
+        // Return metadata only (no values) — consistent with agent-browser path
+        const metadata = extractCookieMetadata(rawCookies as Array<{ name: string; value: string; domain: string; path: string; expires: number | undefined; httpOnly: boolean; secure: boolean; sameSite?: string }>)
+        return textResult(metadata)
       }
       case 'set_cookies': {
         const cookies = args.cookies
@@ -106,6 +189,8 @@ export async function browser(
     session.close()
   }
 }
+
+// ── Helpers ──
 
 function requireString(value: unknown, name: string): string {
   if (typeof value !== 'string' || !value.trim()) throw new Error(`${name} is required`)

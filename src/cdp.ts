@@ -89,7 +89,7 @@ export async function importCookiesFromCdp(
   try {
     rawCookies = await connectAndGetCookies(wsEndpoint, cookieUrls(desc.cookieDomains), signal);
   } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+    return { ok: false, message: sanitizeCookieError(error).message };
   }
   if (!rawCookies) {
     return { ok: false, message: 'CDP connection failed or timed out.' };
@@ -761,15 +761,32 @@ export async function cdpCloseTarget(session: CdpSession): Promise<unknown> {
   return null
 }
 
+function sanitizeCookieError(error: unknown): Error {
+  const message = error instanceof Error ? error.message : String(error)
+  const sanitized = message
+    .replace(/([\"']?(?:cookie|value|token|password|secret|authorization)[\"']?)\s*[:=]\s*[\"']?[^,\s}\"']+[\"']?/gi, '$1=***')
+    .replace(/Bearer\s+\S+/gi, 'Bearer ***')
+    .slice(0, 2000)
+  return new Error(sanitized)
+}
+
 export async function cdpGetCookiesRaw(session: CdpSession, urls?: string[]): Promise<unknown[]> {
-  const params = urls ? { urls } : {}
-  const result = await session.send('Network.getCookies', params, session.pageSessionId)
-  return (result.result?.cookies as unknown[]) ?? []
+  try {
+    const params = urls ? { urls } : {}
+    const result = await session.send('Network.getCookies', params, session.pageSessionId)
+    return (result.result?.cookies as unknown[]) ?? []
+  } catch (error) {
+    throw sanitizeCookieError(error)
+  }
 }
 
 export async function cdpSetCookies(session: CdpSession, cookies: unknown[]): Promise<unknown> {
-  const result = await session.send('Network.setCookies', { cookies }, session.pageSessionId)
-  return result.result
+  try {
+    const result = await session.send('Network.setCookies', { cookies }, session.pageSessionId)
+    return result.result
+  } catch (error) {
+    throw sanitizeCookieError(error)
+  }
 }
 
 // Re-export for reuse
