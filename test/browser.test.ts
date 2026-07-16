@@ -144,8 +144,12 @@ test('cdpNavigate validates URL accepts http/https (containerization handles con
 
   class NoopWs {
     onopen: (() => void) | null = null;
+    onmessage: ((event: MessageEvent) => void) | null = null;
     constructor(readonly url: string) { setTimeout(() => this.onopen?.(), 0); }
-    send(): void {}
+    send(raw: string): void {
+      const msg = JSON.parse(raw) as { id: number };
+      setTimeout(() => this.onmessage?.({ data: JSON.stringify({ id: msg.id, result: {} }) } as MessageEvent), 0);
+    }
     close(): void {}
   }
 
