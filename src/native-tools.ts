@@ -191,8 +191,9 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
           bm25Index.add(id, chunk.text);
           indexedChunks.push({ id, url: page.url, title: page.title, content: chunk.text });
         }
-      } catch {
-        // Ignore individual crawl failures; search/crawl tools should return partial evidence.
+      } catch (err) {
+        // Rethrow on cancellation; ignore other individual page failures for partial evidence.
+        if (options.signal?.aborted) throw err;
       }
     }
   } finally {
@@ -203,7 +204,11 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
   let vectorIndex: VectorIndex | null = null;
   let embeddingClient: EmbeddingClient | null = null;
   const embeddingEnv = options.env ?? process.env;
-  const embeddingEnabled = (embeddingEnv.PI_SEARCH_EMBEDDING_ENABLED ?? '1') !== '0';
+  const embeddingEnabled = (() => {
+    const v = embeddingEnv.PI_SEARCH_EMBEDDING_ENABLED;
+    if (v === undefined) return true;
+    return v !== '0' && v !== 'false';
+  })();
   const externalSidecarUrl = embeddingEnv.EMBEDDING_SIDECAR_BASE_URL;
 
   if (embeddingEnabled) {
@@ -234,10 +239,13 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
     }
   }
 
+  let rankingMethod = 'bm25';
+
   let resultChunks: Array<{ id: string; url: string; title: string; content: string; score: number }> = [];
   if (vectorIndex && embeddingClient) {
     try {
       // Hybrid: BM25 + embedding with RRF fusion
+      rankingMethod = 'bm25+embedding+rrf';
       const queryVec = await embeddingClient.embed(query);
       const bm25Results = bm25Index.search(query, topK * 2);
       const vecResults = vectorIndex.search(queryVec, topK * 2);
@@ -281,8 +289,7 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
     ? resultChunks.map((chunk, index) => `## ${index + 1}. ${chunk.title || chunk.url}\n${chunk.url}\n\n${chunk.content}`).join('\n\n')
     : `No crawl results for: ${query}`;
 
-  const method = vectorIndex ? 'bm25+embedding+rrf' : 'bm25';
-  return textResult(text, { query, results: resultChunks, ranking: { method, documentCount: bm25Index.stats().documentCount } });
+  return textResult(text, { query, results: resultChunks, ranking: { method: rankingMethod, documentCount: bm25Index.stats().documentCount } });
 }
 
 async function agenticBrowse(args: Record<string, unknown>, options: NativeToolOptions): Promise<BackendCallResult> {
@@ -493,6 +500,12 @@ async function semanticSourceUrls(source: Record<string, unknown>, query: string
     : SEARCH_BACKENDS;
   const backends = candidates.filter((backend) => backend.configured(effectiveEnv));
 
+  if (requested.length > 0 && backends.length === 0) {
+    const unknown = requested.filter(r => !SEARCH_BACKENDS.some(b => b.name === r));
+    if (unknown.length > 0) throw new Error(`Unknown web search backends: ${unknown.join(', ')}`);
+    throw new Error(`No known web search backends configured (requested: ${requested.join(', ')})`);
+  }
+
   // Query all configured backends in parallel
   const settled = await Promise.allSettled(backends.map(async (backend) => {
     const results = await backend.search(searchQuery, maxPages, effectiveEnv, signal);
@@ -506,7 +519,8 @@ async function semanticSourceUrls(source: Record<string, unknown>, query: string
   });
 
   if (rankings.length === 0) {
-    // Fallback: if no backends configured/succeeded, try DuckDuckGo directly
+    // Fallback: only DuckDuckGo when no override was requested
+    if (requested.length > 0) return [];
     const ddg = await searchDuckDuckGo(searchQuery, maxPages, signal);
     return ddg.map((r) => r.url).filter(Boolean);
   }
@@ -705,7 +719,7 @@ async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: 
   if (bridge) {
     try {
       const result = await bridge.fetch(url);
-      return { url: result.url, title: result.title || '', content: result.content };
+      return { url: result.url, title: result.title || '', content: stripHtml(result.content) };
     } catch {
       // Fall through to plain fetch
     }

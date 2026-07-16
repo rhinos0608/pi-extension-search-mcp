@@ -23,6 +23,7 @@ device_name = None
 dims = None
 start_time = None
 loaded = False
+load_task = None
 
 
 class EmbeddingRequest(BaseModel):
@@ -34,8 +35,9 @@ class EmbeddingRequest(BaseModel):
 async def lifespan(app: FastAPI):
     global start_time
     start_time = time.time()
+    global load_task
     loop = asyncio.get_event_loop()
-    loop.run_in_executor(None, _load, model_name_arg, os.environ.get('SIDECAR_DEVICE'))
+    load_task = loop.run_in_executor(None, _load, model_name_arg, device_name)
     yield
     logger.info("Shutting down sidecar")
 
@@ -101,9 +103,12 @@ def _count_tokens(texts: List[str]) -> int:
 
 @app.post("/v1/embeddings")
 async def embeddings(req: EmbeddingRequest):
-    global loaded
+    global loaded, load_task
     if not loaded:
-        _load(model_name_arg, device_name)
+        if load_task:
+            await load_task
+        if not loaded:
+            _load(model_name_arg, device_name)
 
     texts = req.input if isinstance(req.input, list) else [req.input]
     if not texts:
@@ -119,7 +124,8 @@ async def embeddings(req: EmbeddingRequest):
         )
 
     try:
-        embeddings = model.encode(texts).tolist()
+        loop = asyncio.get_event_loop()
+        embeddings = (await loop.run_in_executor(None, model.encode, texts)).tolist()
     except Exception as e:
         logger.error(f"Encoding failed: {e}")
         return JSONResponse(

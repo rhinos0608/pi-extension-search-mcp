@@ -275,7 +275,10 @@ node --import tsx --test test/sidecar-manager.test.ts  # all green
 - [ ] Import `SidecarManager` from `./sidecar-manager.js`
 - [ ] Gate behind `PI_SEARCH_EMBEDDING_ENABLED !== '0'`
 - [ ] In `semanticCrawl()`:
-  - Before page loop: create `SidecarManager`, call `ensureRunning()`, create `EmbeddingClient` + `VectorIndex`. Catch errors → fallback to BM25-only.
+  - Reuse a single application-scoped `SidecarManager` when available (shared instance); otherwise create one per call.
+  - If using a per-call manager, stop it in a `finally` block after crawling completes (including error paths) to avoid orphan processes.
+  - If using a shared manager, register an application shutdown hook to stop it on exit.
+  - Before page loop: call `ensureRunning()` on the manager, create `EmbeddingClient` + `VectorIndex`. Catch errors → fallback to BM25-only.
   - During page loop (after BM25 `add`): collect all chunk texts in array. After page loop: call `embeddingClient.embedBatch(texts)`, map returned vectors to chunkIds, add to `VectorIndex`. Catch batch errors → fallback to BM25-only.
   - After page loop (query phase):
     - `bm25Results = bm25Index.search(query, topK * 2)`
@@ -493,7 +496,7 @@ node --import tsx --test test/fusion.test.ts         # all green (including new 
 - [ ] Run `npm test`
 - [ ] Run `npm run typecheck`
 - [ ] Run `npm audit --audit-level=high` (should be clean — no new deps)
-- [ ] Run `npm pack --dry-run`; verify no Python/sidecar/test files ship in package (Python files in `sidecar/` are not in `package.json` `files` array)
+- [ ] Run `npm pack --dry-run`; verify runtime Python files under `sidecar/` (including `sidecar/app.py`) are included in the package, while only sidecar tests and generated data are excluded
 - [ ] Run `git diff --check`; inspect full diff
 - [ ] Manual integration test (if Scrapling + Python deps installed):
   ```bash

@@ -25,6 +25,7 @@ import {
   cleanupRuntimeRoot,
   generateNamespace,
   verifyVersion,
+  resolveAgentBrowserExecutable,
   type AgentBrowserSession,
   type AgentBrowserProcessOptions,
 } from './agent-browser-process.js';
@@ -61,18 +62,25 @@ export const SCREENSHOT_MAX_DIMENSION = 8_000;
 
 export class AgentBrowserAdapter {
   private session: AgentBrowserSession;
-  private executablePath: string;
+  private executablePath: string | undefined;
   private allowedDomains: string[] = [];
   private domainsFrozen = false;
   private _closed = false;
   private _sessionStarted = false;
 
   constructor(options: AgentBrowserAdapterOptions = {}) {
-    this.executablePath = options.executablePath ?? '';
+    this.executablePath = options.executablePath;
     this.session = {
       runtimeRoot: options.runtimeRoot ?? '',
       namespace: '',
     };
+  }
+
+  private async resolveExecutable(): Promise<string> {
+    if (!this.executablePath) {
+      this.executablePath = await resolveAgentBrowserExecutable();
+    }
+    return this.executablePath;
   }
 
   get closed(): boolean {
@@ -87,10 +95,11 @@ export class AgentBrowserAdapter {
    * Perform a status check - verify executable and version without launching browser.
    */
   async status(): Promise<AgentBrowserStatus & BackendCallResult> {
-    const version = await verifyVersion(this.executablePath);
+    const exe = await this.resolveExecutable();
+    const version = await verifyVersion(exe);
     return {
       version,
-      executable: this.executablePath,
+      executable: exe,
       backend: 'agent-browser',
       content: [{ type: 'text', text: `agent-browser ${version} ready` }],
       details: { version, executable: this.executablePath, backend: 'agent-browser' },
@@ -128,7 +137,7 @@ export class AgentBrowserAdapter {
     if (this._closed) return;
     this._closed = true;
     if (this._sessionStarted && this.session.namespace && this.session.runtimeRoot) {
-      await closeSession(this.session, { executablePath: this.executablePath });
+      await closeSession(this.session, { executablePath: this.executablePath ?? '' });
     }
     if (this.session.runtimeRoot) {
       await cleanupRuntimeRoot(this.session.runtimeRoot);
@@ -206,8 +215,9 @@ export class AgentBrowserAdapter {
   }
 
   private mergeOptions(options: AgentBrowserProcessOptions): AgentBrowserProcessOptions {
+    const exePath = this.executablePath ?? options.executablePath ?? '';
     const merged: AgentBrowserProcessOptions = {
-      executablePath: this.executablePath,
+      executablePath: exePath,
       ...options,
     };
     if (this.session.runtimeRoot) merged.runtimeRoot = this.session.runtimeRoot;

@@ -56,6 +56,7 @@ export class SidecarManager {
   private process: ChildProcess | undefined;
   private consecutiveFailures = 0;
   private backoffTimer: ReturnType<typeof setTimeout> | undefined;
+  private _startPromise: Promise<void> | undefined;
   private killTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options?: SidecarManagerOptions) {
@@ -75,6 +76,8 @@ export class SidecarManager {
   async start(): Promise<void> {
     // If already running, no-op
     if (this._status === 'running') return;
+    // Coalesce concurrent start calls
+    if (this._status === 'starting' && this._startPromise) return this._startPromise;
 
     // Cancel any pending restart
     clearTimeout(this.backoffTimer);
@@ -90,71 +93,87 @@ export class SidecarManager {
     this._status = 'starting';
     this._error = undefined;
 
-    try {
-      const port = await this.getRandomPort();
-      this._port = port;
+    this._startPromise = (async (): Promise<void> => {
+      // Capture the promise reference for cleanup
+      const currentPromise = this._startPromise;
+      try {
+        const port = await this.getRandomPort();
+        this._port = port;
 
-      const args = [
-        this.options.scriptPath,
-        '--port',
-        String(port),
-        '--model',
-        this.options.model,
-      ];
-      if (this.options.device) {
-        args.push('--device', this.options.device);
-      }
-
-      const child = this._spawn(this.options.pythonPath, args, {
-        stdio: ['pipe', 'pipe', 'inherit'],
-      });
-      this.process = child;
-
-      // Listen for unexpected exit from the very start
-      child.on('exit', (code, signal) => {
-        if (this.process === child) {
-          this.handleExit(code, signal);
+        const args = [
+          this.options.scriptPath,
+          '--port',
+          String(port),
+          '--model',
+          this.options.model,
+        ];
+        if (this.options.device) {
+          args.push('--device', this.options.device);
         }
-      });
 
-      // Set up port-line listener BEFORE the spawn-error check so stdout
-      // data emitted on a later tick is not missed.
-      const portLinePromise = this.waitForPortLine(child, port);
+        const child = this._spawn(this.options.pythonPath, args, {
+          stdio: ['pipe', 'pipe', 'inherit'],
+        });
+        this.process = child;
 
-      // Catch spawn errors (ENOENT, etc.) — setImmediate pattern from cdp.ts
-      const spawnError = await new Promise<Error | null>((resolve) => {
-        child.on('error', resolve);
-        setImmediate(() => resolve(null));
-      });
-      if (spawnError) {
-        this.process = undefined;
-        this._status = 'error';
-        this._error = spawnError.message;
-        // The port-line promise will be rejected by its own timeout or the
-        // exit handler; we ignore the rejection since we're already failing.
-        portLinePromise.catch(() => {});
-        throw spawnError;
+        // Listen for unexpected exit from the very start
+        child.on('exit', (code, signal) => {
+          if (this.process === child) {
+            this.handleExit(code, signal);
+          }
+        });
+
+        // Set up port-line listener BEFORE the spawn-error check so stdout
+        // data emitted on a later tick is not missed.
+        const portLinePromise = this.waitForPortLine(child, port);
+
+        // Catch spawn errors (ENOENT, etc.) — setImmediate pattern from cdp.ts
+        const spawnError = await new Promise<Error | null>((resolve) => {
+          child.on('error', resolve);
+          setImmediate(() => resolve(null));
+        });
+        if (spawnError) {
+          this.process = undefined;
+          this._status = 'error';
+          this._error = spawnError.message;
+          // The port-line promise will be rejected by its own timeout or the
+          // exit handler; we ignore the rejection since we're already failing.
+          portLinePromise.catch(() => {});
+          throw spawnError;
+        }
+
+        // Parse SIDECAR_PORT=<port> line from stdout
+        await portLinePromise;
+
+        // Poll /v1/health until ok
+        await this.pollHealth(port);
+
+        // Success
+        this._status = 'running';
+      } catch (err) {
+        // Ensure status reflects failure (pollHealth already sets error;
+        // other failures like getRandomPort or waitForPortLine do not).
+        if (this._status !== 'error') {
+          this._status = 'error';
+        }
+        if (!this._error) {
+          this._error = err instanceof Error ? err.message : String(err);
+        }
+        // Kill the child process to avoid orphan processes on startup failure
+        if (this.process) {
+          try { this.process.kill('SIGKILL'); } catch { /* ignore */ }
+          this.process = undefined;
+        }
+        throw err;
+      } finally {
+        if (this._startPromise === currentPromise) {
+          this._startPromise = undefined;
+        }
       }
-
-      // Parse SIDECAR_PORT=<port> line from stdout
-      await portLinePromise;
-
-      // Poll /v1/health until ok
-      await this.pollHealth(port);
-
-      // Success
-      this._status = 'running';
-    } catch (err) {
-      // Ensure status reflects failure (pollHealth already sets error;
-      // other failures like getRandomPort or waitForPortLine do not).
-      if (this._status !== 'error') {
-        this._status = 'error';
-      }
-      if (!this._error) {
-        this._error = err instanceof Error ? err.message : String(err);
-      }
-      throw err;
-    }
+    })();
+    // Suppress unhandled rejection: errors propagate via return value and are handled by caller
+    this._startPromise.catch(() => {});
+    return this._startPromise;
   }
 
   private async waitForPortLine(child: ChildProcess, expectedPort: number): Promise<void> {
@@ -211,12 +230,20 @@ export class SidecarManager {
       }
 
       try {
-        const response = await fetch(`${baseUrl}/v1/health`);
-        if (response.ok) {
-          const data = (await response.json()) as { status: string };
-          if (data.status === 'ok') {
-            return;
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) break;
+        const controller = new AbortController();
+        const fetchTimer = setTimeout(() => controller.abort(), remaining);
+        try {
+          const response = await fetch(`${baseUrl}/v1/health`, { signal: controller.signal });
+          if (response.ok) {
+            const data = (await response.json()) as { status: string };
+            if (data.status === 'ok') {
+              return;
+            }
           }
+        } finally {
+          clearTimeout(fetchTimer);
         }
       } catch (err) {
         lastError = err instanceof Error ? err.message : String(err);
@@ -253,6 +280,7 @@ export class SidecarManager {
     );
 
     this._status = 'starting';
+    this._startPromise = undefined; // Clear so start() creates a fresh attempt
     this.backoffTimer = setTimeout(() => {
       this.start().catch(() => {
         // Errors already captured in instance state by start()
@@ -270,8 +298,12 @@ export class SidecarManager {
         if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
         const controller = new AbortController();
         const timer = setTimeout(() => controller.abort(), 10_000);
-        const response = await fetch(`${externalUrl}/v1/health`, { headers, signal: controller.signal });
-        clearTimeout(timer);
+        let response;
+        try {
+          response = await fetch(`${externalUrl}/v1/health`, { headers, signal: controller.signal });
+        } finally {
+          clearTimeout(timer);
+        }
         if (response.ok) {
           const data = await response.json() as { status?: string };
           if (data.status === 'ok') {

@@ -142,6 +142,7 @@ export class BM25Index {
 
   search(query: string, topK?: number): BM25Result[] {
     const k = topK ?? 20;
+    if (k <= 0) return [];
     const queryTokens = tokenize(query);
 
     if (queryTokens.length === 0 || this.totalDocs === 0) return [];

@@ -7,9 +7,9 @@ export interface EmbeddingClientOptions {
 
 export interface EmbeddingHealthResponse {
   status: string;
-  model?: string;
-  dimensions?: number;
-  device?: string;
+  model?: string | null;
+  dimensions?: number | null;
+  device?: string | null;
 }
 
 export class EmbeddingUnavailableError extends Error {
@@ -54,7 +54,7 @@ export class EmbeddingClient {
   constructor(options?: EmbeddingClientOptions) {
     this.baseUrl = options?.baseUrl ?? DEFAULT_BASE_URL;
     this.timeout = options?.timeout ?? DEFAULT_TIMEOUT_MS;
-    this.maxRetries = options?.maxRetries ?? DEFAULT_MAX_RETRIES;
+    this.maxRetries = Math.max(1, options?.maxRetries ?? DEFAULT_MAX_RETRIES);
     this.signal = options?.signal;
     this.apiToken = process.env.EMBEDDING_SIDECAR_API_TOKEN || undefined;
   }
@@ -78,7 +78,7 @@ export class EmbeddingClient {
       {
         method: 'POST',
         headers: this.buildHeaders(),
-        body: JSON.stringify({ input: texts }),
+        body: JSON.stringify({ input: texts.map((t) => t.slice(0, MAX_INPUT_CHARS)) }),
       },
     );
     return data.data.map((item) => new Float32Array(item.embedding));

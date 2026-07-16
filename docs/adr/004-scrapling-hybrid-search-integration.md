@@ -31,7 +31,7 @@ Pi-Atlas has a minimal-dependency philosophy (5 npm deps: pi-ai, mcp-sdk, agent-
 Implement Okapi BM25 from scratch (~200 lines) in `src/bm25.ts`:
 - `BM25Index` class: inverted index, IDF computation, term-frequency saturation
 - Parameters: `k1=1.5`, `b=0.75` (standard defaults)
-- Tokenizer: lowercase, `/\W+/` split, min length 2, English stopword filter (stopwords list inline, ~150 words, no external file)
+- Tokenizer: lowercase, `/\p{L}+|\p{N}+/gu` (Unicode-aware: preserves non-ASCII words and splits on underscore), min length 2, English stopword filter (stopwords list inline, ~150 words, no external file)
 - No stemming initially (add later if quality gap proven)
 - Replaces `scoreText()` boolean term-inclusion count
 - In-memory only; sufficient for typical `semanticCrawl` scope (< 10K chunks)

@@ -106,6 +106,7 @@ function chunkSpans(
         if (subSlice.length >= minChars) {
           chunks.push({ text: subSlice, start: subPos, end: subEnd });
         }
+        if (subEnd >= spanEnd) break;
         subPos = Math.max(subEnd - overlap, subPos + 1);
       }
     } else if (spanText.length >= minChars) {
@@ -155,7 +156,7 @@ export function chunkText(text: string, options?: ChunkOptions): TextChunk[] {
   }
 
   // Level 1: split on sentence boundaries
-  const sentenceRegex = /(?<=[.!?])\s+(?=[A-Z])/g;
+  const sentenceRegex = /(?<=[.!?])\s+(?=\p{L})/gu;
   let spans = getSpans(text, sentenceRegex);
   let chunks = chunkSpans(text, spans, maxChars, overlap, minChars);
   if (chunks.length > 0) return chunks;

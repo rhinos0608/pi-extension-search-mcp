@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
@@ -14,8 +15,28 @@ test('callNativeTool fetch alias routes to semanticCrawl', async () => {
   );
 });
 
-test('callNativeTool fetch returns same result as semantic_crawl for private URL', { skip: 'Private URL guard removed — containerization handles containment; full tool test requires running local server' }, async () => {
-  /* skip */
+test('callNativeTool fetch returns same result as semantic_crawl for private URL', async () => {
+  // Start ephemeral HTTP server
+  const server: Server = createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html' });
+    res.end('<html><body><h1>Hello World</h1><p>Test content for crawling.</p></body></html>');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
+  const privateUrl = `http://127.0.0.1:${addr.port}/`;
+
+  try {
+    const fetchResult = await callNativeTool('fetch', { url: privateUrl, query: 'hello' });
+    const crawlResult = await callNativeTool('semantic_crawl', { source: { type: 'url', url: privateUrl }, query: 'hello', maxPages: 1 });
+
+    const fetchText = JSON.stringify(fetchResult);
+    const crawlText = JSON.stringify(crawlResult);
+    assert.match(fetchText, /hello/i);
+    assert.match(crawlText, /hello/i);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
 });
 
 test('callNativeTool rejects unsupported tools', async () => {

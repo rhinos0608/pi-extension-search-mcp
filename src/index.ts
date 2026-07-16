@@ -250,7 +250,7 @@ function registerExpansionTools(pi: ExtensionAPI, client: SearchBackend, env: Re
     promptGuidelines: [
       'Uses agent-browser backend by default; set PI_SEARCH_BROWSER_BACKEND=cdp for explicit loopback CDP rollback.',
       'Respects PI_SEARCH_BROWSER_AUTOMATION=0 opt-out.',
-      'Navigates to any http/https URL — containerization handles network containment and security; no hostname blacklist or DNS preflight. evaluate and set_cookies are gated by policy classification.',
+      'Navigates to any http/https URL — requires verified egress containment and fails closed when containment cannot be confirmed. evaluate and set_cookies are gated by policy classification.',
       'cookies returns metadata only (values never exposed).',
     ],
     parameters: Type.Object({

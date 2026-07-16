@@ -162,6 +162,34 @@ test('health(): returns available=true when Python available', async () => {
   await bridge.close();
 });
 
+// ── Dependency-gated real adapter integration test ──
+test('fetch(): real Python Scrapling adapter command round-trip', { skip: process.env.SCRAPLING_SMOKE_TEST !== '1' }, async () => {
+  // This test spawns the real embedded Python adapter and validates the full
+  // command/response contract. Skip by default; run with SCRAPLING_SMOKE_TEST=1.
+  const { ScraplingBridge } = await import('../src/scrapling-bridge.js');
+  type ScraplingBridgeOptions = import('../src/scrapling-bridge.js').ScraplingBridgeOptions;
+  const bridge = new ScraplingBridge({
+    pythonPath: 'python3',
+    fetchTimeout: 15_000,
+  } as ScraplingBridgeOptions);
+
+  try {
+    const health = await bridge.health();
+    assert.equal(health.available, true, 'Scrapling Python adapter must be installed');
+    assert.ok(health.scraplingVersion);
+    assert.ok(health.pythonVersion);
+
+    // Test a real fetch against a known public page
+    const result = await bridge.fetch('https://example.com');
+    assert.ok(result.url);
+    assert.ok(typeof result.title === 'string');
+    assert.ok(typeof result.content === 'string');
+    assert.ok(result.content.length > 0, 'should have fetched page content');
+  } finally {
+    await bridge.close();
+  }
+});
+
 test('health(): returns available=false when Python unavailable', async () => {
   const bridge = createBridge({
     responses: [{ ok: false, error: 'scrapling not installed' }],

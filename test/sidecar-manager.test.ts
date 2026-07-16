@@ -1,8 +1,19 @@
 import assert from 'node:assert/strict';
-import { test } from 'node:test';
+import { afterEach, test } from 'node:test';
 import { EventEmitter } from 'node:events';
 import { SidecarManager } from '../src/sidecar-manager.js';
 import type { SidecarManagerOptions } from '../src/sidecar-manager.js';
+
+// ── Fetch mock auto-restore ──
+const _mocks: Array<{ orig: typeof globalThis.fetch | undefined; mock: typeof globalThis.fetch | undefined }> = [];
+afterEach(() => {
+  for (const entry of _mocks) {
+    if (globalThis.fetch === entry.mock) {
+      globalThis.fetch = entry.orig ?? globalThis.fetch;
+    }
+  }
+  _mocks.length = 0;
+});
 
 // ── Constants ──
 
@@ -126,20 +137,11 @@ function createManager(
 
   // Replace fetch globally for this test
   if (_fetch) {
-    const origFetch = globalThis.fetch;
-    mgr.__origFetch = origFetch;
+    _mocks.push({ orig: globalThis.fetch, mock: _fetch });
     globalThis.fetch = _fetch;
   }
 
-  // Store cleanup reference
-  (mgr as any).__cleanupFetch = () => {
-    if ((mgr as any).__origFetch) {
-      globalThis.fetch = (mgr as any).__origFetch;
-    }
-  };
-
   return mgr as InstanceType<typeof SidecarManager> & {
-    __cleanupFetch: () => void;
     __spawnRecords: typeof spawnRecords;
     __currentChild: typeof currentChild;
   };
@@ -207,8 +209,6 @@ test('start spawns python3 with correct args and transitions to running', async 
   assert.ok(rec.args.includes('my-model'));
   assert.ok(rec.args.includes('--device'));
   assert.ok(rec.args.includes('cuda'));
-
-  mgr.__cleanupFetch();
 });
 
 test('start uses default model when not specified', async () => {
@@ -218,7 +218,6 @@ test('start uses default model when not specified', async () => {
   const rec = spawnRecords[0]!;
   assert.ok(rec.args.includes('--model'));
   assert.ok(rec.args.includes('all-MiniLM-L6-v2'));
-  mgr.__cleanupFetch();
 });
 
 test('start skips --device when device is empty string', async () => {
@@ -227,7 +226,6 @@ test('start skips --device when device is empty string', async () => {
 
   const rec = spawnRecords[0]!;
   assert.ok(!rec.args.includes('--device'));
-  mgr.__cleanupFetch();
 });
 
 test('start is no-op if already running', async () => {
@@ -239,7 +237,6 @@ test('start is no-op if already running', async () => {
 
   assert.equal(spawnRecords.length, countAfterFirst);
   assert.equal(mgr.health().status, 'running');
-  mgr.__cleanupFetch();
 });
 
 test('start throws if spawn fails (ENOENT)', async () => {
@@ -250,7 +247,6 @@ test('start throws if spawn fails (ENOENT)', async () => {
   assert.equal(mgr.health().status, 'error');
   assert.ok(mgr.health().error?.includes('ENOENT'));
   spawnShouldFail = false;
-  mgr.__cleanupFetch();
 });
 
 // ---------------------------------------------------------------------------
@@ -266,7 +262,6 @@ test('ensureRunning no-op when already running', async () => {
 
   assert.equal(spawnRecords.length, 0);
   assert.equal(mgr.health().status, 'running');
-  mgr.__cleanupFetch();
 });
 
 test('ensureRunning calls start when stopped', async () => {
@@ -277,7 +272,6 @@ test('ensureRunning calls start when stopped', async () => {
 
   assert.equal(spawnRecords.length, 1);
   assert.equal(mgr.health().status, 'running');
-  mgr.__cleanupFetch();
 });
 
 test('ensureRunning throws when start fails', async () => {
@@ -285,7 +279,6 @@ test('ensureRunning throws when start fails', async () => {
 
   await assert.rejects(() => mgr.ensureRunning(), /timed out/i);
   assert.equal(mgr.health().status, 'error');
-  mgr.__cleanupFetch();
 });
 
 test('ensureRunning waits for in-progress start', async () => {
@@ -296,7 +289,6 @@ test('ensureRunning waits for in-progress start', async () => {
 
   await Promise.all([startPromise, ensurePromise]);
   assert.equal(mgr.health().status, 'running');
-  mgr.__cleanupFetch();
 });
 
 // ---------------------------------------------------------------------------
@@ -318,7 +310,6 @@ test('stop sends SIGTERM and cleans up', async () => {
 
   assert.equal(mgr.health().status, 'stopped');
   assert.equal(mgr.health().port, undefined);
-  mgr.__cleanupFetch();
 });
 
 test('stop is safe when not started', async () => {
@@ -337,7 +328,6 @@ test('stop is safe when process already exited', async () => {
 
   await mgr.stop();
   assert.equal(mgr.health().status, 'stopped');
-  mgr.__cleanupFetch();
 });
 
 // ---------------------------------------------------------------------------
@@ -354,7 +344,6 @@ test('getBaseUrl returns correct URL after start', async () => {
   await mgr.start();
 
   assert.equal(mgr.getBaseUrl(), `http://127.0.0.1:${TEST_PORT}`);
-  mgr.__cleanupFetch();
 });
 
 // ---------------------------------------------------------------------------
@@ -368,7 +357,6 @@ test('auto-restarts on unexpected process exit', async () => {
   currentChild!.emit('exit', 1, null);
   await waitFor(() => spawnRecords.length >= 2);
   assert.equal(mgr.health().status, 'running');
-  mgr.__cleanupFetch();
 });
 
 // ---------------------------------------------------------------------------
@@ -388,7 +376,6 @@ test('gives up after 5 consecutive crashes', async () => {
   const spawnCountAfter = spawnRecords.length;
   await new Promise(r => setTimeout(r, 100));
   assert.equal(spawnRecords.length, spawnCountAfter);
-  mgr.__cleanupFetch();
 });
 
 // ---------------------------------------------------------------------------
@@ -404,5 +391,4 @@ test('start throws on startup timeout', async () => {
     (mgr.health().error ?? '').toLowerCase().includes('timed out'),
     'error should mention timeout',
   );
-  mgr.__cleanupFetch();
 });

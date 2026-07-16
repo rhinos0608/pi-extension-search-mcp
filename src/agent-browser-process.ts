@@ -174,6 +174,8 @@ export async function resolveAgentBrowserExecutable(explicitPath?: string): Prom
 /**
  * Verify agent-browser version without launching browser.
  */
+const VERIFY_VERSION_TIMEOUT_MS = 10_000;
+
 export async function verifyVersion(executablePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const child = spawn(executablePath, ['--version'], {
@@ -181,9 +183,20 @@ export async function verifyVersion(executablePath: string): Promise<string> {
       env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
     });
     let stdout = '';
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      reject(new Error(`agent-browser --version timed out after ${VERIFY_VERSION_TIMEOUT_MS}ms`));
+    }, VERIFY_VERSION_TIMEOUT_MS);
     child.stdout!.on('data', (chunk: Buffer) => { stdout += String(chunk); });
-    child.on('error', (err: Error) => reject(new Error(`Cannot execute agent-browser: ${err.message}`)));
+    child.on('error', (err: Error) => {
+      clearTimeout(timer);
+      if (!timedOut) reject(new Error(`Cannot execute agent-browser: ${err.message}`));
+    });
     child.on('close', (code) => {
+      clearTimeout(timer);
+      if (timedOut) return;
       if (code !== 0) reject(new Error(`agent-browser --version exited ${code}`));
       else {
         const version = stdout.trim();

@@ -19,7 +19,7 @@ import {
 import { textResult as guardedTextResult } from './tool-output.js'
 import { AgentBrowserAdapter } from './agent-browser.js'
 import { resolveAgentBrowserExecutable } from './agent-browser-process.js'
-import { extractCookieMetadata, validateLegacyLoopbackEndpoint } from './browser-policy.js'
+import { extractCookieMetadata, isSensitiveAction, validateLegacyLoopbackEndpoint } from './browser-policy.js'
 
 export type BrowserAction = 'status' | 'tabs' | 'navigate' | 'evaluate' | 'text' | 'html' | 'screenshot' | 'click' | 'type' | 'scroll' | 'close' | 'cookies' | 'set_cookies'
 
@@ -36,13 +36,18 @@ export function resolveBrowserBackend(env?: Record<string, string | undefined>):
 // ── Persistent adapter ──
 
 let _adapter: AgentBrowserAdapter | null = null
+let _adapterInit: Promise<AgentBrowserAdapter> | null = null
 
 async function getAdapter(env?: Record<string, string | undefined>): Promise<AgentBrowserAdapter> {
-  if (!_adapter) {
+  if (_adapter) return _adapter
+  if (_adapterInit) return _adapterInit
+  _adapterInit = (async () => {
     const executablePath = await resolveAgentBrowserExecutable(env?.BROWSER_EXECUTABLE_PATH)
     _adapter = new AgentBrowserAdapter({ env, executablePath })
-  }
-  return _adapter
+    _adapterInit = null
+    return _adapter
+  })()
+  return _adapterInit
 }
 
 export async function closeBrowserSession(): Promise<void> {
@@ -109,6 +114,10 @@ async function legacyCdpBrowser(
 
   validateLegacyLoopbackEndpoint(endpoint)
   const action = typeof args.action === 'string' ? args.action : 'status'
+
+  if (isSensitiveAction(action) && env.PI_SEARCH_BROWSER_ALLOW_SENSITIVE !== '1') {
+    return textResult({ error: `${action} disabled by policy. Set PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1 to enable.` })
+  }
 
   if (action === 'status') {
     return textResult({

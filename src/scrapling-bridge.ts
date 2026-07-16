@@ -48,6 +48,8 @@ def main():
                 fetcher_kwargs = {}
                 if proxy:
                     fetcher_kwargs["proxy"] = proxy
+                if cmd.get("solve_cloudflare"):
+                    fetcher_kwargs["cloudflare_solver"] = True
 
                 if fetcher_name == "dynamic":
                     fetcher = DynamicFetcher(**fetcher_kwargs)
@@ -56,14 +58,16 @@ def main():
                 else:
                     fetcher = StealthyFetcher(**fetcher_kwargs)
 
-                result = fetcher.get(url, timeout=timeout)
+                # Fetcher.get timeout is in seconds
+                timeout_sec = timeout / 1000 if timeout > 1000 else timeout
+                result = fetcher.get(url, timeout=timeout_sec)
                 _write({
                     "ok": True,
                     "url": getattr(result, 'url', url),
                     "title": getattr(result, 'title', ''),
-                    "content": getattr(result, 'content', ''),
-                    "status_code": getattr(result, 'status_code', 200),
-                    "content_type": getattr(result, 'content_type', ''),
+                    "content": getattr(result, 'text', getattr(result, 'content', '')),
+                    "status_code": getattr(result, 'status', 200),
+                    "content_type": str(getattr(result, 'headers', {}).get('content-type', '')),
                 })
             except Exception as e:
                 _write({"ok": False, "error": f"{type(e).__name__}: {e}"})
@@ -136,6 +140,7 @@ export class ScraplingBridge {
 
   private _child: ChildProcess | undefined;
   private _buffer = '';
+  private _fetching: Promise<unknown> | null = null;
   private _pendingResolve: ((value: Record<string, unknown>) => void) | null = null;
   private _pendingReject: ((reason: unknown) => void) | null = null;
   private _closed = false;
@@ -194,44 +199,57 @@ export class ScraplingBridge {
     }
 
     const scriptPath = ScraplingBridge.ensureScript();
-    await this.ensureProcess(scriptPath);
 
-    // Try with one restart
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const response = await this.sendCommand({
-          action: 'fetch',
-          url: validatedUrl,
-          fetcher: this.options.fetcher,
-          solve_cloudflare: this.options.solveCloudflare,
-          proxy: this.options.proxy ?? null,
-          timeout: this.options.fetchTimeout,
-        });
+    // Serialize fetch calls so queued operations cannot start while a prior
+    // command is retrying or restartProcess is still running.
+    const prev = this._fetching ?? Promise.resolve();
+    const current = (async () => {
+      await prev;
+      await this.ensureProcess(scriptPath);
 
-        if (response.ok === true) {
-          return {
-            url: String(response.url ?? validatedUrl),
-            title: String(response.title ?? ''),
-            content: String(response.content ?? ''),
-            ...(response.status_code !== undefined && response.status_code !== null
-              ? { statusCode: Number(response.status_code) }
-              : {}),
-            ...(response.content_type ? { contentType: String(response.content_type) } : {}),
-          };
+      // Try with one restart
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          const response = await this.sendCommand({
+            action: 'fetch',
+            url: validatedUrl,
+            fetcher: this.options.fetcher,
+            solve_cloudflare: this.options.solveCloudflare,
+            proxy: this.options.proxy ?? null,
+            timeout: this.options.fetchTimeout,
+          });
+
+          if (response.ok === true) {
+            return {
+              url: String(response.url ?? validatedUrl),
+              title: String(response.title ?? ''),
+              content: String(response.content ?? ''),
+              ...(response.status_code !== undefined && response.status_code !== null
+                ? { statusCode: Number(response.status_code) }
+                : {}),
+              ...(response.content_type ? { contentType: String(response.content_type) } : {}),
+            };
+          }
+
+          // Error response from Python — restart and retry
+          if (attempt === 2) break;
+          await this.restartProcess(scriptPath);
+        } catch {
+          // If bridge was closed or aborted, don't restart
+          if (this._closed || this._signal?.aborted) throw new Error('ScraplingBridge is closed');
+          // Process error / crash — restart and retry
+          if (attempt === 2) break;
+          await this.restartProcess(scriptPath);
         }
-
-        // Error response from Python — restart and retry
-        if (attempt === 2) break;
-        await this.restartProcess(scriptPath);
-      } catch {
-        // Process error / crash — restart and retry
-        if (attempt === 2) break;
-        await this.restartProcess(scriptPath);
       }
-    }
-
-    // Fall back to plain HTTP fetch
-    return this.fallbackFetch(validatedUrl);
+      // All retry attempts exhausted — fall back to plain HTTP
+      return this.fallbackFetch(validatedUrl);
+    })();
+    this._fetching = current.then(
+      () => { if (this._fetching === current) this._fetching = null; },
+      () => { if (this._fetching === current) this._fetching = null; },
+    );
+    return current;
   }
 
   async health(): Promise<ScraplingHealthStatus> {
@@ -401,9 +419,11 @@ export class ScraplingBridge {
   }
 
   private async restartProcess(scriptPath: string): Promise<void> {
+    if (this._closed || this._signal?.aborted) return;
     this.killChild();
     // Brief yield to let OS release resources
     await new Promise((r) => setImmediate(r));
+    if (this._closed || this._signal?.aborted) return;
     this.spawnProcess(scriptPath);
   }
 
@@ -421,12 +441,39 @@ export class ScraplingBridge {
         return;
       }
 
-      this._pendingResolve = resolve;
-      this._pendingReject = reject;
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        this._pendingResolve = null;
+        const rejectFn = this._pendingReject;
+        this._pendingReject = null;
+        if (rejectFn) {
+          rejectFn(new Error('Command timed out'));
+        }
+        if (child && !child.killed) {
+          try { child.kill('SIGKILL'); } catch { /* ignore */ }
+        }
+      }, this.options.fetchTimeout);
+
+      this._pendingResolve = (value) => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        this._pendingResolve = null;
+        this._pendingReject = null;
+        resolve(value);
+      };
+      this._pendingReject = (reason) => {
+        if (timedOut) return;
+        clearTimeout(timer);
+        this._pendingResolve = null;
+        this._pendingReject = null;
+        reject(reason);
+      };
 
       try {
         child.stdin.write(JSON.stringify(data) + '\n');
       } catch (err) {
+        clearTimeout(timer);
         this._pendingResolve = null;
         this._pendingReject = null;
         reject(err);
