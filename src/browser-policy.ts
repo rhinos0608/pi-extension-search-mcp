@@ -2,6 +2,8 @@
 
 // ── Action union ──
 
+import { validateJobRequest } from './browser-job.js';
+
 export type BrowserAction =
   | 'status'
   | 'tabs'
@@ -20,12 +22,16 @@ export type BrowserAction =
   | 'fill'
   | 'wait'
   | 'get_url'
-  | 'get_title';
+  | 'get_title'
+  | 'semanticAction'
+  | 'job'
+  | 'batch';
 
 export const BROWSER_ACTIONS: readonly BrowserAction[] = [
   'status', 'tabs', 'navigate', 'evaluate', 'text', 'html', 'screenshot',
   'click', 'type', 'scroll', 'close', 'cookies', 'set_cookies',
   'snapshot', 'fill', 'wait', 'get_url', 'get_title',
+  'semanticAction', 'job', 'batch',
 ] as const;
 
 export const LEGACY_ACTIONS: readonly BrowserAction[] = [
@@ -35,9 +41,9 @@ export const LEGACY_ACTIONS: readonly BrowserAction[] = [
 
 // ── Sensitive classification ──
 
-export type SensitiveAction = 'evaluate' | 'set_cookies';
+export type SensitiveAction = 'evaluate' | 'set_cookies' | 'batch';
 
-export const SENSITIVE_ACTIONS: readonly SensitiveAction[] = ['evaluate', 'set_cookies'] as const;
+export const SENSITIVE_ACTIONS: readonly SensitiveAction[] = ['evaluate', 'set_cookies', 'batch'] as const;
 
 export function isSensitiveAction(action: string): action is SensitiveAction {
   return (SENSITIVE_ACTIONS as readonly string[]).includes(action);
@@ -232,6 +238,88 @@ export function validateLegacyLoopbackEndpoint(endpoint: string): LoopbackEndpoi
   };
 }
 
+// ── Semantic action types (Component 9) ──
+
+export type SemanticLocator = 'role' | 'text' | 'label' | 'placeholder' | 'alt' | 'title' | 'testid' | 'first' | 'last' | 'nth';
+export type SemanticVerb = 'click' | 'fill' | 'check' | 'uncheck' | 'select' | 'type' | 'hover';
+
+export interface SemanticActionRequest {
+  locator: SemanticLocator;
+  query: string;
+  verb: SemanticVerb;
+  name?: string;
+  index?: number;
+  value?: string;
+  exact?: boolean;
+}
+
+const VALID_LOCATORS: readonly SemanticLocator[] = ['role', 'text', 'label', 'placeholder', 'alt', 'title', 'testid', 'first', 'last', 'nth'];
+const VALID_VERBS: readonly SemanticVerb[] = ['click', 'fill', 'check', 'uncheck', 'select', 'type', 'hover'];
+const VALUE_VERBS = new Set<SemanticVerb>(['fill', 'type', 'select']);
+
+/** Validate a raw semantic action request, throwing on invalid shape. */
+export function validateSemanticActionRequest(raw: Record<string, unknown>): SemanticActionRequest {
+  const locator = typeof raw.locator === 'string' ? raw.locator.trim() : '';
+  if (!locator || !(VALID_LOCATORS as readonly string[]).includes(locator)) {
+    throw new Error(`locator is required and must be one of: ${VALID_LOCATORS.join(', ')}`);
+  }
+  const query = typeof raw.query === 'string' ? raw.query.trim() : '';
+  if (!query) throw new Error('query is required');
+  const verb = typeof raw.verb === 'string' ? raw.verb.trim() : '';
+  if (!verb || !(VALID_VERBS as readonly string[]).includes(verb)) {
+    throw new Error(`verb is required and must be one of: ${VALID_VERBS.join(', ')}`);
+  }
+  if (locator === 'nth') {
+    if (typeof raw.index !== 'number' || !Number.isFinite(raw.index)) {
+      throw new Error('index is required when locator is nth');
+    }
+  }
+  if (VALUE_VERBS.has(verb as SemanticVerb) && (raw.value === undefined || typeof raw.value !== 'string')) {
+    throw new Error(`value is required when verb is ${verb}`);
+  }
+
+  const req: SemanticActionRequest = { locator: locator as SemanticLocator, query, verb: verb as SemanticVerb };
+  if (typeof raw.name === 'string' && raw.name) req.name = raw.name;
+  if (typeof raw.index === 'number') req.index = raw.index;
+  if (typeof raw.value === 'string') req.value = raw.value;
+  if (raw.exact === true) req.exact = true;
+  return req;
+}
+
+// ── Batch types (Component 11) ──
+
+export interface BatchCommand {
+  args: string[];
+  sensitive?: boolean;
+}
+
+export interface BatchRequest {
+  commands: BatchCommand[];
+  maxCommands?: number;
+}
+
+const MAX_BATCH_COMMANDS = 20;
+
+/** Validate a raw batch request, throwing on invalid shape. */
+export function validateBatchRequest(raw: Record<string, unknown>): BatchRequest {
+  if (!Array.isArray(raw.commands) || raw.commands.length === 0) {
+    throw new Error('commands is required and must be a non-empty array');
+  }
+  const maxCommands = typeof raw.maxCommands === 'number' ? raw.maxCommands : MAX_BATCH_COMMANDS;
+  if (raw.commands.length > maxCommands) {
+    throw new Error(`too many commands (max ${maxCommands})`);
+  }
+  const commands: BatchCommand[] = [];
+  for (let i = 0; i < raw.commands.length; i++) {
+    const c = raw.commands[i] as Record<string, unknown>;
+    if (typeof c !== 'object' || c === null) throw new Error(`command ${i}: must be an object`);
+    if (!Array.isArray(c.args) || c.args.length === 0) throw new Error(`command ${i}: args is required and must be a non-empty array`);
+    const args = c.args.filter((a): a is string => typeof a === 'string');
+    commands.push({ args, sensitive: c.sensitive !== false });
+  }
+  return { commands, maxCommands };
+}
+
 // ── Browser request envelope ──
 
 export interface BrowserRequest {
@@ -246,6 +334,10 @@ export interface BrowserRequest {
   cookies?: unknown[];
   allowedDomains?: string[];
   waitMs?: number;
+  compact?: boolean;
+  semanticAction?: SemanticActionRequest;
+  job?: import('./browser-job.js').JobRequest;
+  batch?: BatchRequest;
 }
 
 export function validateBrowserRequest(raw: Record<string, unknown>): BrowserRequest {
@@ -273,6 +365,16 @@ export function validateBrowserRequest(raw: Record<string, unknown>): BrowserReq
     request.allowedDomains = domains;
   }
   if (typeof raw.waitMs === 'number') request.waitMs = raw.waitMs;
+  if (raw.compact === true) request.compact = true;
+  if (typeof raw.semanticAction === 'object' && raw.semanticAction !== null) {
+    request.semanticAction = validateSemanticActionRequest(raw.semanticAction as Record<string, unknown>);
+  }
+  if (typeof raw.job === 'object' && raw.job !== null) {
+    request.job = validateJobRequest(raw.job as Record<string, unknown>);
+  }
+  if (typeof raw.batch === 'object' && raw.batch !== null) {
+    request.batch = validateBatchRequest(raw.batch as Record<string, unknown>);
+  }
 
   return request;
 }
