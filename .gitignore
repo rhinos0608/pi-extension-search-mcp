@@ -3,6 +3,11 @@ node_modules/
 .env.*
 !.env.example
 dist/
+src/**/*.js
+src/**/*.js.map
+test/**/*.js
+test/**/*.js.map
+!*.config.js
 .DS_Store
 **/.DS_Store
 .pi-smartread/
