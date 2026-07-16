@@ -21,7 +21,15 @@ cd Pi-Atlas
 npm install
 ```
 
-Requires Node.js ≥ 24. The `agent-browser` package downloads a native binary (~86 MB) on install.
+Requires Node.js ≥ 24. On install, `npm install` automatically downloads the `agent-browser` native binary (~86 MB). This is a one-time operation.
+
+If the download is slow or fails:
+- Check network/proxy settings: `npm config get proxy`, `npm config get https-proxy`
+- Verify internet connectivity to GitHub (where binaries are hosted)
+- Use `npm install --verbose` to see download progress
+- If stuck, try clearing npm cache: `npm cache clean --force && npm install`
+
+Once installed, browser automation is ready with zero additional setup.
 
 Add to your Pi config:
 
@@ -157,13 +165,73 @@ User-facing setup and status commands (not LLM tools):
 - `/reach-status [family]` — inspect channels and backends, e.g. `/reach-status social`
 - `/reach-setup [action]` — `auto`, `status`, `plan`, `install_core`, `install_all`, `install_channels`, `import_cookies`, `login`
 
-## Desktop automation
+## Browser automation
 
-`desktop` uses manually installed [Cua Driver v0.7.1](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.7.1). Disabled by default — set `PI_SEARCH_DESKTOP_AUTOMATION=1` to enable.
+`browser` tool provides headless browser control via agent-browser (default) or CDP fallback.
 
-Observation is AX-only by default. Screenshots require explicit opt-in, target one known window, and return inline image content only. AX trees and images can expose PII and credentials — close sensitive applications before enabling. Mutations require a fresh `stateId`, are serialized per window, and are never retried after dispatch. Transport loss yields `OUTCOME_UNKNOWN`. Driver permissions remain user-owned; session shutdown cannot revoke Accessibility or Screen Recording grants.
+### Installation
 
-## Browser security
+Agent-browser is installed automatically as an npm dependency. On first `npm install`, the native browser binary downloads (~86 MB). This is a one-time operation:
+
+```bash
+npm install
+# Browser binary downloads automatically
+```
+
+No additional setup required — the tool works immediately.
+
+### Capabilities
+
+`browser` supports these actions:
+
+| Action | Parameters | What it does |
+|--------|-----------|------|
+| `status` | none | Check browser backend (agent-browser or cdp) and session state |
+| `tabs` | none | List open browser tabs |
+| `navigate` | `url: string` | Navigate to a URL (public HTTP/HTTPS only) |
+| `text` | none | Extract visible text from the current page |
+| `html` | none | Get raw HTML of the current page |
+| `screenshot` | none | Capture a PNG screenshot of the page |
+| `click` | `selector: string` | Click an element (CSS selector) |
+| `type` | `selector: string`, `text: string` | Type text into an input field |
+| `scroll` | `x?: number`, `y?: number` | Scroll by pixel offset |
+| `close` | none | Close the current tab |
+| `cookies` | `urls?: string[]` | Read cookie metadata (name, domain, path, expiry, flags — values never exposed) |
+| `set_cookies` | `cookies: Array<{name, value?, domain?, path?, ...}>` | Set cookies for a domain (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
+| `evaluate` | `expression: string` | Run JavaScript in the page context, return result (requires `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`) |
+
+### Examples
+
+```bash
+# Navigate and take a screenshot
+browser({ action: "navigate", url: "https://example.com" })
+browser({ action: "screenshot" })
+
+# Extract text
+browser({ action: "text" })
+
+# Interact with form
+browser({ action: "click", selector: "#search-input" })
+browser({ action: "type", selector: "#search-input", text: "query" })
+browser({ action: "click", selector: "button[type=submit]" })
+
+# Evaluate JavaScript
+browser({ action: "evaluate", expression: "document.title" })
+
+# Read cookies
+browser({ action: "cookies", urls: ["https://example.com"] })
+```
+
+### Backend selection
+
+Defaults to agent-browser. For CDP fallback:
+
+```bash
+export PI_SEARCH_BROWSER_BACKEND="cdp"
+export BROWSER_CDP_ENDPOINT="http://127.0.0.1:9222"
+```
+
+### Security
 
 - Agent-browser uses owned isolated sessions with strict public-domain navigation
 - `evaluate` and `set_cookies` are disabled by default; enable with `PI_SEARCH_BROWSER_ALLOW_SENSITIVE=1`
@@ -171,6 +239,122 @@ Observation is AX-only by default. Screenshots require explicit opt-in, target o
 - CDP endpoints are restricted to loopback (localhost/127.0.0.1), ports 1024–65535
 - Security enforcement is external through containerization and other extensions
 - DNS preflight is defense-in-depth; high-assurance deployments need OS-level egress controls
+
+## Desktop automation
+
+`desktop` tool provides native desktop observation and interaction via [Cua Driver](https://github.com/trycua/cua).
+
+### Installation
+
+Cua Driver is optional and disabled by default. To enable:
+
+1. Download [Cua Driver v0.7.1](https://github.com/trycua/cua/releases/tag/cua-driver-rs-v0.7.1) for your platform:
+   - **macOS**: Download `cua-driver-aarch64-apple-darwin` (Apple Silicon) or `cua-driver-x86_64-apple-darwin` (Intel)
+   - **Linux**: Download `cua-driver-x86_64-unknown-linux-gnu`
+   - **Windows**: Download `cua-driver-x86_64-pc-windows-msvc.exe`
+
+2. Make it executable and place it on your `$PATH` (typically `/usr/local/bin`):
+
+```bash
+chmod +x cua-driver
+sudo mv cua-driver /usr/local/bin/
+```
+
+3. Grant permissions (one-time, OS-dependent):
+   - **macOS**: First run prompts for Accessibility (System Settings > Security & Privacy)
+   - **Linux**: May require `sudo` or xinput permissions
+   - **Windows**: Run as Administrator the first time
+
+4. Enable the tool:
+
+```bash
+export PI_SEARCH_DESKTOP_AUTOMATION="1"
+```
+
+Optionally configure the driver path:
+
+```bash
+export CUA_DRIVER_PATH="/usr/local/bin/cua-driver"
+```
+
+### Capabilities
+
+`desktop` supports these actions:
+
+| Action | Parameters | What it does |
+|--------|-----------|------|
+| `status` | none | Check Cua Driver health and permissions |
+| `list_apps` | none | List running applications |
+| `list_windows` | none | List open windows across all apps |
+| `observe_window` | `pid: number`, `windowId: string`, `includeScreenshot?: boolean` | Get accessibility tree (AX) for a window; optionally screenshot |
+| `click` | `pid: number`, `windowId: string`, `x: number`, `y: number`, `stateId: string` | Click at coordinates (requires fresh state ID) |
+| `type_text` | `pid: number`, `windowId: string`, `text: string`, `stateId: string` | Type text (requires fresh state ID) |
+| `press_key` | `pid: number`, `windowId: string`, `key: string`, `stateId: string` | Press a key (e.g., "Return", "Escape") |
+| `scroll` | `pid: number`, `windowId: string`, `deltaX?: number`, `deltaY?: number`, `stateId: string` | Scroll by pixel delta (requires fresh state ID) |
+| `wait` | `pid: number`, `windowId: string`, `predicate?: {text?, role?}`, `timeoutMs?: number` | Poll until text/role appears in AX tree (default 30s timeout) |
+
+### Examples
+
+```bash
+# Check driver health
+desktop({ action: "status" })
+
+# List windows
+desktop({ action: "list_windows" })
+
+# Observe a window's accessibility tree
+desktop({ action: "observe_window", pid: 1234, windowId: "main-window", includeScreenshot: false })
+
+# Observe with screenshot
+desktop({ action: "observe_window", pid: 1234, windowId: "main-window", includeScreenshot: true })
+
+# Interact (requires stateId from observe_window response)
+desktop({ action: "click", pid: 1234, windowId: "main-window", x: 100, y: 200, stateId: "state-123" })
+desktop({ action: "type_text", pid: 1234, windowId: "main-window", text: "hello", stateId: "state-123" })
+
+# Wait for text to appear
+desktop({ action: "wait", pid: 1234, windowId: "main-window", predicate: { text: "Save" }, timeoutMs: 5000 })
+```
+
+### State IDs
+
+Mutations (click, type, scroll) require a fresh `stateId` from the most recent `observe_window` call. After each mutation, you must call `observe_window` again to get a new state ID before the next mutation. This ensures:
+
+- State consistency: AX tree matched to real state
+- Atomicity: mutations are serialized and never retried after dispatch
+- Isolation: transport loss yields `OUTCOME_UNKNOWN` (no blind retries)
+
+### Screenshots
+
+- Optional via `includeScreenshot: true` in `observe_window`
+- Returns as inline base64 image content
+- **Sensitive**: closes all apps before enabling; PII/credentials can leak
+- Returns PNG with window content, resolution capped at 2048×2048 pixels
+
+### Observations
+
+- AX (Accessibility) tree is AX-only by default; includes element names, roles, values, but not visual pixel data
+- Tree depth capped at 50 levels; node count capped at 5000
+- Redacts sensitive fields: passwords, tokens, secrets, paths
+- Screenshot bytes capped at 10 MB (prevents large binaries)
+
+### Permissions
+
+Cua Driver requires OS-level permissions (never prompt — user must grant in System Settings):
+
+- **macOS**: Accessibility (System Settings > Privacy & Security > Accessibility)
+- **Linux**: X11 or Wayland permissions (varies by desktop)
+- **Windows**: Administrator for some actions
+
+Permissions are user-owned and persist across sessions. Session shutdown cannot revoke grants.
+
+### Security & Privacy
+
+- Disabled by default — set `PI_SEARCH_DESKTOP_AUTOMATION=1` to enable
+- Observation is AX-only by default; screenshots require explicit opt-in
+- Screenshots and AX trees can expose sensitive information — only use with trusted applications
+- Mutations are serialized per window; transport loss is not retried
+- Redaction is applied to output (passwords, tokens, paths removed before AI sees them)
 
 ## Package contract
 
