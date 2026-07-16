@@ -139,7 +139,7 @@ test('CdpSession.addEventListener captures events (messages without id)', async 
 
 // ── High-level CDP primitive tests ──
 
-test('cdpNavigate validates URL (rejects private hosts, non-http)', async () => {
+test('cdpNavigate validates URL accepts http/https (containerization handles containment)', async () => {
   const saved = globalThis.WebSocket;
 
   class NoopWs {
@@ -155,7 +155,8 @@ test('cdpNavigate validates URL (rejects private hosts, non-http)', async () => 
     const session = new CdpSession('ws://127.0.0.1:9222/devtools/page/test');
     await session.ready();
 
-    await assert.rejects(() => cdpNavigate(session, 'http://localhost:3000'), /Disallowed private or local host/);
+    // localhost now passes — containerization handles containment
+    await assert.doesNotReject(() => cdpNavigate(session, 'http://localhost:3000'));
     await assert.rejects(() => cdpNavigate(session, 'ftp://example.com'), /Disallowed URL scheme/);
   } finally {
     (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = saved;
