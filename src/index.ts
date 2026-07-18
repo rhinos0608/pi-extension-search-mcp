@@ -87,9 +87,9 @@ export default function (pi: ExtensionAPI): void {
   pi.registerTool({
     name: 'fetch',
     label: 'Fetch',
-    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus. Needs a url — compose with web_search first to discover candidate URLs, then call fetch with query for semantically packed results. Prefer query over fetching full pages: query returns only relevant passages, full-page fetches overload context. Omit query only when you need the complete readable text of a single URL.',
-    promptSnippet: 'Fetch URL content — compose with web_search first to get URLs, then call fetch with query for semantic chunks. Prefer query over full-page fetches.',
-    promptGuidelines: ['Always compose fetch with web_search first — web_search discovers candidate URLs, fetch retrieves their content.', 'Prefer fetch with query for semantically packed results; only omit query when you need the complete readable text of a single URL.', 'Full-page fetches overload context — use query mode by default.'],
+    description: 'Fetch a URL\'s readable text, or semantically retrieve relevant passages from a URL or web-search-derived corpus. Needs a url — compose with web_search first to discover candidate URLs, then call fetch with query for semantically packed results. Prefer query over fetching full pages: query returns only relevant passages, full-page fetches overload context. Omit query only when you need the complete readable text of a single URL. Use followLinks with a url and query to crawl a site by following same-domain links.',
+    promptSnippet: 'Fetch URL content — compose with web_search first to get URLs, then call fetch with query for semantic chunks. Prefer query over full-page fetches. Use followLinks to crawl interlinked pages on the same domain.',
+    promptGuidelines: ['Always compose fetch with web_search first — web_search discovers candidate URLs, fetch retrieves their content.', 'Prefer fetch with query for semantically packed results; only omit query when you need the complete readable text of a single URL.', 'Full-page fetches overload context — use query mode by default.', 'Use followLinks with url and query to crawl a site by following same-domain links (requires both url and query).'],
     parameters: Type.Object({
       query: Type.Optional(Type.String({ description: 'Retrieval query. Omit to get the readable text of url instead of semantic chunks.' })),
       url: Type.Optional(Type.String({ description: 'Specific URL to crawl/fetch. Required when query is omitted.' })),
@@ -97,6 +97,7 @@ export default function (pi: ExtensionAPI): void {
       topK: Type.Optional(Type.Number({ minimum: 1, maximum: 20, description: 'Relevant chunks to return, default 8.' })),
       maxPages: Type.Optional(Type.Number({ minimum: 1, maximum: 25, description: 'Maximum pages to crawl, default 10.' })),
       maxChars: Type.Optional(Type.Number({ minimum: 1, maximum: 50000, description: 'Max characters in no-query readable-text mode, default 12000.' })),
+      followLinks: Type.Optional(Type.Boolean({ description: 'Crawl the site by following same-domain links from url. Requires query; results are always semantically packed.' })),
     }),
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
       const route = buildFetchRoute(params);
@@ -333,7 +334,28 @@ export function buildMediaRoute(params: { platform?: string; action?: string; ur
   };
 }
 
-export function buildFetchRoute(params: { query?: string; url?: string; searchQuery?: string; topK?: number; maxPages?: number; maxChars?: number }): { tool: string; args: Record<string, unknown>; timeout: number } {
+export function buildFetchRoute(params: { query?: string; url?: string; searchQuery?: string; topK?: number; maxPages?: number; maxChars?: number; followLinks?: boolean }): { tool: string; args: Record<string, unknown>; timeout: number } {
+  const followLinks = Boolean(params.followLinks);
+
+  if (followLinks) {
+    // followLinks requires both url and query
+    if (!params.url?.trim()) throw new Error('followLinks requires url — specify a crawl root URL');
+    if (!params.query?.trim()) throw new Error('followLinks requires a query — site-wide crawls always return semantically packed results');
+    const source = buildSemanticSource(params.url, undefined);
+    return {
+      tool: 'semantic_crawl',
+      args: {
+        source,
+        query: params.query,
+        topK: params.topK ?? 8,
+        maxPages: params.maxPages ?? 10,
+        followLinks: true,
+        maxDepth: 3,
+      },
+      timeout: 300_000,
+    };
+  }
+
   if (!params.query?.trim()) {
     if (!params.url?.trim()) throw new Error('url is required when query is omitted');
     return {

@@ -113,6 +113,23 @@ When you call `fetch` with a `query` parameter, Pi-Atlas performs **hybrid searc
 5. **Embedding ranking** — vector similarity via embedding sidecar (if configured)
 6. **RRF fusion** — merges BM25 and embedding rankings into final results
 
+#### Site-wide crawling with `followLinks`
+
+Set `followLinks: true` to crawl the entire site starting from `url`. The tool performs a bounded BFS across same-domain pages, extracts and indexes all content, then returns only the passages most relevant to your `query`.
+
+```
+fetch({ query: "pricing tiers", url: "https://example.com", followLinks: true })
+```
+
+- **`followLinks` requires both `url` and `query`** — site-wide crawls always use semantic packing; raw page dumps are not supported
+- **Same-domain only** — external links are ignored; subdomains (`sub.example.com`) are excluded
+- **`maxPages`** — controls total pages crawled (default 10, max 25)
+- **`maxDepth`** — hardcoded at 3 levels deep, preventing runaway crawls
+- **URL dedup** — fragments, tracking params, trailing slashes normalized before enqueue
+- **Non-HTML content** — skipped automatically (PDFs, images, archives)
+- **Graceful degradation** — link extraction uses Scrapling's CSS selector engine when available; falls back to regex-based extraction from raw HTML
+- **Output** — limited to the most relevant `topK` chunks (default 8) via the same BM25+embedding RRF pipeline
+
 Every layer degrades gracefully: no Python → plain HTTP fetch, no sidecar → BM25-only, no backends → DuckDuckGo fallback.
 
 ```

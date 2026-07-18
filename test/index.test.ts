@@ -203,6 +203,43 @@ test('buildSearchRoute research paper category routes to web_search', () => {
   assert.equal(route.args.category, 'research paper');
 });
 
+test('buildFetchRoute followLinks without url throws', () => {
+  assert.throws(
+    () => buildFetchRoute({ followLinks: true, query: 'docs' }),
+    /followLinks requires url/,
+  );
+});
+
+test('buildFetchRoute followLinks without query throws', () => {
+  assert.throws(
+    () => buildFetchRoute({ followLinks: true, url: 'https://example.com' }),
+    /followLinks requires a query/,
+  );
+});
+
+test('buildFetchRoute followLinks routes to semantic_crawl with maxDepth 3', () => {
+  const route = buildFetchRoute({ followLinks: true, url: 'https://example.com', query: 'docs' });
+  assert.equal(route.tool, 'semantic_crawl');
+  assert.equal(route.args.followLinks, true);
+  assert.equal(route.args.maxDepth, 3);
+  assert.equal(route.args.query, 'docs');
+  assert.equal((route.args.source as { type: string }).type, 'url');
+  assert.equal((route.args.source as { url: string }).url, 'https://example.com');
+  assert.equal(route.timeout, 300_000);
+});
+
+test('buildFetchRoute without followLinks behaves as before', () => {
+  const route = buildFetchRoute({ url: 'https://example.com', query: 'test' });
+  assert.equal(route.tool, 'semantic_crawl');
+  assert.equal(route.args.followLinks, undefined);
+  assert.equal(route.args.maxDepth, 1);
+});
+
+test('buildFetchRoute no-followLinks no-query still requires url', () => {
+  assert.throws(() => buildFetchRoute({}), /url is required when query is omitted/);
+});
+
+
 test('buildSearchRoute limit clamping: 30 on research, 20 on web', () => {
   const researchRoute = buildSearchRoute({ query: 'test', category: 'research', limit: 30 });
   assert.equal(researchRoute.args.limit, 30);

@@ -61,6 +61,34 @@ def main():
                 # Fetcher.get timeout is in seconds
                 timeout_sec = timeout / 1000 if timeout > 1000 else timeout
                 result = fetcher.get(url, timeout=timeout_sec)
+                # Extract same-page links if requested
+                links = []
+                if cmd.get("extract_links"):
+                    try:
+                        from urllib.parse import urljoin, urlparse
+                        raw_links = result.css('a::attr(href)').getall() if hasattr(result, 'css') else []
+                        page_url = getattr(result, 'url', url)
+                        for href in raw_links:
+                            if not href or href.startswith('#') or href.startswith('javascript:'):
+                                continue
+                            try:
+                                abs_url = urljoin(page_url, href)
+                                parsed = urlparse(abs_url)
+                                if parsed.scheme in ('http', 'https'):
+                                    # Strip fragment to match extractLinksFromHtml normalization
+                                    clean_url = parsed._replace(fragment='').geturl()
+                                    # Exclude binary/file extensions matching BINARY_EXTENSIONS
+                                    path_lower = parsed.path.lower()
+                                    dot_idx = path_lower.rfind('.')
+                                    if dot_idx != -1:
+                                        ext = path_lower[dot_idx:]
+                                        if ext in ('.pdf','.zip','.gz','.tar','.rar','.7z','.exe','.dmg','.pkg','.deb','.rpm','.png','.jpg','.jpeg','.gif','.webp','.svg','.ico','.bmp','.tiff','.mp3','.mp4','.avi','.mov','.wmv','.flv','.webm','.ogg','.wav','.woff','.woff2','.ttf','.otf','.eot','.doc','.docx','.xls','.xlsx','.ppt','.pptx','.csv','.json','.xml','.yaml','.yml','.bin','.dat','.so','.dll','.dylib'):
+                                            continue
+                                    links.append(clean_url)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 _write({
                     "ok": True,
                     "url": getattr(result, 'url', url),
@@ -68,6 +96,8 @@ def main():
                     "content": getattr(result, 'text', getattr(result, 'content', '')),
                     "status_code": getattr(result, 'status', 200),
                     "content_type": str(getattr(result, 'headers', {}).get('content-type', '')),
+                    "links": links,
+                    "content_length": len(getattr(result, 'text', getattr(result, 'content', ''))),
                 })
             except Exception as e:
                 _write({"ok": False, "error": f"{type(e).__name__}: {e}"})
@@ -103,6 +133,7 @@ export interface ScraplingBridgeOptions {
   proxy?: string;
   fetchTimeout?: number;
   signal?: AbortSignal;
+  extractLinks?: boolean;
 }
 
 export interface ScraplingFetchResult {
@@ -111,6 +142,8 @@ export interface ScraplingFetchResult {
   content: string;
   statusCode?: number;
   contentType?: string;
+  links?: string[];
+  contentLength?: number;
 }
 
 export interface ScraplingHealthStatus {
@@ -132,6 +165,7 @@ export class ScraplingBridge {
     solveCloudflare: boolean;
     proxy: string | undefined;
     fetchTimeout: number;
+    extractLinks: boolean;
   };
   private readonly _enabled: boolean;
   private readonly _signal: AbortSignal | undefined;
@@ -164,6 +198,7 @@ export class ScraplingBridge {
       solveCloudflare: options?.solveCloudflare ?? true,
       proxy: options?.proxy ?? env.PI_SEARCH_SCRAPLING_PROXY ?? undefined,
       fetchTimeout: options?.fetchTimeout ?? DEFAULT_FETCH_TIMEOUT_MS,
+      extractLinks: options?.extractLinks ?? false,
     };
 
     this._signal = options?.signal;
@@ -217,6 +252,7 @@ export class ScraplingBridge {
             solve_cloudflare: this.options.solveCloudflare,
             proxy: this.options.proxy ?? null,
             timeout: this.options.fetchTimeout,
+            extract_links: this.options.extractLinks ?? false,
           });
 
           if (response.ok === true) {
@@ -228,6 +264,8 @@ export class ScraplingBridge {
                 ? { statusCode: Number(response.status_code) }
                 : {}),
               ...(response.content_type ? { contentType: String(response.content_type) } : {}),
+              ...(Array.isArray(response.links) ? { links: response.links as string[] } : {}),
+              ...(typeof response.content_length === 'number' ? { contentLength: response.content_length as number } : {}),
             };
           }
 

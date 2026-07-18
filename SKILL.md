@@ -10,7 +10,7 @@ Use this extension when current external evidence or repository context would im
 ## Tool choice
 
 - `web_search`: broad web discovery, including academic/public-data/community sources via `category: "research"`. Use first when you need current sources or candidate URLs.
-- `fetch`: needs a `url` to work — compose with `web_search` first to discover candidate URLs, then call `fetch` with `query` for semantically packed results. Prefer `query` over fetching full pages: `query` returns only the relevant passages, full-page fetches overload context. Omit `query` only when you need the complete readable text of a single URL.
+- `fetch`: needs a `url` to work — compose with `web_search` first to discover candidate URLs, then call `fetch` with `query` for semantically packed results. Prefer `query` over fetching full pages: `query` returns only the relevant passages, full-page fetches overload context. Omit `query` only when you need the complete readable text of a single URL. Use `followLinks` with a `url` and `query` to crawl relevant same-domain pages within the configured `maxPages` and `maxDepth` bounds (requires both `url` and `query`).
 - `browser`: closed agent-browser automation (navigate, snapshot, fill, wait, get URL/title, screenshot, click, type, scroll, tabs, metadata-only cookies); explicit loopback CDP rollback via `PI_SEARCH_BROWSER_BACKEND=cdp`.
 - `github`: inspect repositories, files, trees, code search, trending repos, and semantic code search.
 - `social`: search/read Twitter/X, Reddit, V2EX, XiaoHongShu, Facebook, and Instagram.

@@ -10,6 +10,7 @@ import { VectorIndex } from './vector-index.js';
 import { EmbeddingClient } from './embedding-client.js';
 import { SidecarManager } from './sidecar-manager.js';
 import { ScraplingBridge } from './scrapling-bridge.js';
+import { extractLinksFromHtml } from './link-extraction.js';
 
 type NativeToolName = 'web_search' | 'semantic_crawl' | 'fetch' | 'agentic_browse' | 'browse' | 'research' | 'research_sources' | 'github';
 
@@ -157,7 +158,19 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
   const topK = clampedNumber(args.topK, 8, 1, SEMANTIC_TOP_K_MAX);
   const maxPages = clampedNumber(args.maxPages, 10, 1, SEMANTIC_MAX_PAGES_MAX);
   const source = asRecord(args.source);
-  const urls = dedupeBy(await semanticSourceUrls(source, query, maxPages, options.signal, options.env), normalizeUrl);
+  const followLinks = Boolean(args.followLinks);
+  const maxDepth = followLinks ? 3 : (args.maxDepth != null ? Number(args.maxDepth) : (source.type === 'url' ? 1 : 0));
+
+  // Determine seed URLs: followLinks always starts from a single root URL
+  let seedUrls: string[];
+  if (followLinks) {
+    const urlStr = (source.type === 'url' && typeof source.url === 'string') ? source.url.trim()
+      : (typeof args.url === 'string' ? args.url.trim() : undefined);
+    if (!urlStr) throw new Error('followLinks requires url as source');
+    seedUrls = [validatePublicHttpUrl(urlStr)];
+  } else {
+    seedUrls = dedupeBy(await semanticSourceUrls(source, query, maxPages, options.signal, options.env), normalizeUrl);
+  }
 
   const bm25Index = new BM25Index();
   const indexedChunks: Array<{ id: string; url: string; title: string; content: string }> = [];
@@ -169,6 +182,7 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
     bridge = new ScraplingBridge({
       fetcher: 'stealthy',
       solveCloudflare: true,
+      ...(followLinks ? { extractLinks: true } : {}),
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.env?.PI_SEARCH_SCRAPLING_PROXY ? { proxy: options.env.PI_SEARCH_SCRAPLING_PROXY } : {}),
     });
@@ -183,17 +197,84 @@ async function semanticCrawl(args: Record<string, unknown>, options: NativeToolO
   }
 
   try {
-    for (const url of urls.slice(0, maxPages)) {
-      try {
-        const page = await fetchReadablePage(url, options.signal, bridge);
-        for (const chunk of chunkTextSmart(page.content)) {
-          const id = String(chunkCounter++);
-          bm25Index.add(id, chunk.text);
-          indexedChunks.push({ id, url: page.url, title: page.title, content: chunk.text });
+    if (followLinks) {
+      // Bounded BFS crawl: frontier of {url, depth}, visited+scheduled sets, same-domain-only
+      const visited = new Set<string>();
+      const scheduled = new Set<string>();
+      const rootUrl = new URL(seedUrls[0]!);
+      const rootHost = rootUrl.hostname.replace(/^www\./, '');
+      interface FrontierEntry { url: string; depth: number; }
+      const frontier: FrontierEntry[] = [];
+      for (const seed of seedUrls) {
+        const norm = normalizeUrl(seed);
+        if (!scheduled.has(norm)) {
+          scheduled.add(norm);
+          frontier.push({ url: seed, depth: 0 });
         }
-      } catch (err) {
-        // Rethrow on cancellation; ignore other individual page failures for partial evidence.
-        if (options.signal?.aborted) throw err;
+      }
+      let pagesAttempted = 0;
+
+      while (frontier.length > 0) {
+        if (options.signal?.aborted) break;
+        if (pagesAttempted >= maxPages) break;
+        const entry = frontier.shift()!;
+        const normalized = normalizeUrl(entry.url);
+        if (visited.has(normalized)) continue;
+        if (entry.depth > maxDepth) continue;
+        visited.add(normalized);
+
+        pagesAttempted++;
+        try {
+          const page = await fetchReadablePage(entry.url, options.signal, bridge);
+
+          // Index page content
+          for (const chunk of chunkTextSmart(page.content)) {
+            const id = String(chunkCounter++);
+            bm25Index.add(id, chunk.text);
+            indexedChunks.push({ id, url: page.url, title: page.title, content: chunk.text });
+          }
+
+          // Extract links and add to frontier (if within depth)
+          if (entry.depth < maxDepth) {
+            const pageLinks: string[] = page.links ?? [];
+            // If bridge didn't return links, try extracting from raw HTML
+            if (pageLinks.length === 0 && page.rawHtml) {
+              pageLinks.push(...extractLinksFromHtml(page.rawHtml, page.url));
+            }
+            for (const link of pageLinks) {
+              try {
+                const linkHost = new URL(link).hostname.replace(/^www\./, '');
+                if (linkHost === rootHost) {
+                  const linkNorm = normalizeUrl(link);
+                  if (!visited.has(linkNorm) && !scheduled.has(linkNorm)) {
+                    scheduled.add(linkNorm);
+                    frontier.push({ url: link, depth: entry.depth + 1 });
+                  }
+                }
+              } catch {
+                // Skip malformed URLs
+              }
+            }
+          }
+        } catch (err) {
+          if (options.signal?.aborted) throw err;
+          // Skip failed pages in BFS
+        }
+      }
+    } else {
+      // Original flat fetch loop (unchanged)
+      for (const url of seedUrls.slice(0, maxPages)) {
+        try {
+          const page = await fetchReadablePage(url, options.signal, bridge);
+          for (const chunk of chunkTextSmart(page.content)) {
+            const id = String(chunkCounter++);
+            bm25Index.add(id, chunk.text);
+            indexedChunks.push({ id, url: page.url, title: page.title, content: chunk.text });
+          }
+        } catch (err) {
+          // Rethrow on cancellation; ignore other individual page failures for partial evidence.
+          if (options.signal?.aborted) throw err;
+        }
       }
     }
   } finally {
@@ -712,14 +793,17 @@ async function searchHackerNews(query: string, limit: number, signal?: AbortSign
   }));
 }
 
-async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: ScraplingBridge): Promise<{ url: string; title: string; content: string }> {
+
+
+async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: ScraplingBridge): Promise<{ url: string; title: string; content: string; rawHtml?: string; links?: string[] }> {
   const url = validatePublicHttpUrl(rawUrl);
 
   // Try Scrapling bridge first (if provided and enabled)
   if (bridge) {
     try {
       const result = await bridge.fetch(url);
-      return { url: result.url, title: result.title || '', content: stripHtml(result.content) };
+      const links = Array.isArray(result.links) && result.links.length > 0 ? result.links : undefined;
+      return { url: result.url, title: result.title || '', content: stripHtml(result.content), rawHtml: result.content, ...(links ? { links } : {}) };
     } catch {
       // Fall through to plain fetch
     }
@@ -728,7 +812,7 @@ async function fetchReadablePage(rawUrl: string, signal?: AbortSignal, bridge?: 
   // Fallback: plain HTTP fetch
   const html = await fetchText(url, signal);
   const title = cleanText((/<title[^>]*>([\s\S]*?)<\/title>/i.exec(html)?.[1] ?? '').trim());
-  return { url, title, content: stripHtml(html) };
+  return { url, title, content: stripHtml(html), rawHtml: html };
 }
 
 async function githubJson(url: string, env: Record<string, string | undefined>, signal?: AbortSignal): Promise<unknown> {

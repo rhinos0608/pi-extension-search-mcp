@@ -347,3 +347,176 @@ test('reddit feed filter maps to hot and popular feeds with limits', async () =>
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+// ── followLinks BFS crawl tests ──
+
+test('followLinks crawl visits same-domain pages and skips external', async () => {
+  let externalRequestCount = 0;
+  const externalServer: Server = createServer((_req, res) => {
+    externalRequestCount++;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<html><body><h1>External</h1><p>External content from other domain.</p></body></html>');
+  });
+  await new Promise<void>((resolve) => externalServer.listen(0, '127.0.0.1', () => resolve()));
+  const extAddr = externalServer.address();
+  if (!extAddr || typeof extAddr === 'string') throw new Error('Failed to get external server address');
+  // Use localhost hostname so domain check (rootHost=127.0.0.1) rejects it
+  const externalUrl = `http://localhost:${extAddr.port}/other`;
+
+  const pages: Record<string, string> = {
+    '/': `<html><body><h1>Home</h1><p>Welcome to the homepage. This page contains general information about our site and services we provide to customers.</p><a href="/about">About</a> <a href="/contact">Contact</a> <a href="${externalUrl}">External</a></body></html>`,
+    '/about': '<html><body><h1>About</h1><p>About page content. Learn more about our history, mission, and values. We have been serving customers since the early days of the internet and continue to grow.</p><a href="/">Home</a></body></html>',
+    '/contact': '<html><body><h1>Contact</h1><p>Contact info. Reach out to us via email or phone. Our office is open Monday through Friday from nine to five.</p></body></html>',
+  };
+
+  const server: Server = createServer((req, res) => {
+    const path = req.url ?? '/';
+    const body = pages[path];
+    if (body) {
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(body);
+    } else {
+      res.writeHead(404); res.end('Not found');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    const result = await callNativeTool('fetch', {
+      url: baseUrl + '/',
+      query: 'about contact',
+      followLinks: true,
+      maxPages: 10,
+    });
+    const text = JSON.stringify(result);
+    // Should find content from all 3 same-domain pages
+    assert.match(text, /Welcome to the homepage/i, 'should include home page content');
+    assert.match(text, /About page content/i, 'should include about page content');
+    assert.match(text, /Contact info/i, 'should include contact page content');
+    // Should NOT include external domain content
+    assert.doesNotMatch(text, /External.*other/, 'should not include external domain content');
+    // External server should not have received any requests (different hostname)
+    assert.equal(externalRequestCount, 0, 'external domain should not be crawled');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await new Promise<void>((resolve) => externalServer.close(() => resolve()));
+  }
+});
+
+test('followLinks crawl deduplicates normalized URLs', async () => {
+  let pageCount = 0;
+  const server: Server = createServer((_req, res) => {
+    pageCount++;
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end('<html><body><h1>Page</h1><p>This page contains enough content to be chunked and indexed properly for testing deduplication behavior.</p><a href="/">Self link</a></body></html>');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    await callNativeTool('fetch', {
+      url: baseUrl + '/',
+      query: 'page',
+      followLinks: true,
+      maxPages: 10,
+    });
+    // Should only fetch the page once despite self-link
+    assert.equal(pageCount, 1, 'should dedup self-referencing URL');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('followLinks crawl respects maxPages limit', async () => {
+  const pages: Record<string, string> = {};
+  for (let i = 0; i < 5; i++) {
+    pages[`/p${i}`] = `<html><body><h1>Page ${i}</h1><p>This is page number ${i} with enough content to exceed the minimum chunk size requirement for proper testing of the crawl pipeline and page limits.</p><a href="/p${(i + 1) % 5}">Next</a></body></html>`;
+  }
+  let fetchCount = 0;
+  const server: Server = createServer((req, res) => {
+    const path = req.url ?? '/';
+    const body = pages[path];
+    if (body) {
+      fetchCount++;
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(body);
+    } else {
+      res.writeHead(404); res.end('Not found');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    await callNativeTool('fetch', {
+      url: baseUrl + '/p0',
+      query: 'page content',
+      followLinks: true,
+      maxPages: 3,
+    });
+    assert.ok(fetchCount <= 3, `should respect maxPages=3, got ${fetchCount}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('followLinks crawl respects maxDepth via custom maxDepth', async () => {
+  // Pages: /d0 -> /d1 -> /d2 -> /d3
+  const pages: Record<string, string> = {
+    '/d0': '<html><body><h1>Depth 0</h1><p>This is the first page in our depth chain. It contains links that go deeper into the site structure for testing purposes.</p><a href="/d1">Next</a></body></html>',
+    '/d1': '<html><body><h1>Depth 1</h1><p>This is the second page in our depth chain. Content at depth one provides navigation to deeper levels of the site.</p><a href="/d2">Next</a></body></html>',
+    '/d2': '<html><body><h1>Depth 2</h1><p>This is the third page in our depth chain. Content at depth two provides navigation to even deeper levels.</p><a href="/d3">Next</a></body></html>',
+    '/d3': '<html><body><h1>Depth 3</h1><p>This is the deepest page in our depth chain. Content at the maximum depth level has no further links to follow.</p></body></html>',
+  };
+  const visitedPaths = new Set<string>();
+  const server: Server = createServer((req, res) => {
+    const path = req.url ?? '/';
+    const body = pages[path];
+    if (body) {
+      visitedPaths.add(path);
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(body);
+    } else {
+      res.writeHead(404); res.end('Not found');
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', () => resolve()));
+  const addr = server.address();
+  if (!addr || typeof addr === 'string') throw new Error('Failed to get server address');
+  const baseUrl = `http://127.0.0.1:${addr.port}`;
+
+  try {
+    // maxPages: 20, so the depth limit is what constrains
+    await callNativeTool('fetch', {
+      url: baseUrl + '/d0',
+      query: 'depth content',
+      followLinks: true,
+      maxPages: 20,
+    });
+    // Default maxDepth is 3 for followLinks, so /d0 (depth 0) -> /d1 (1) -> /d2 (2) -> /d3 (3) should all be visited
+    assert.ok(visitedPaths.has('/d0'));
+    assert.ok(visitedPaths.has('/d1'));
+    assert.ok(visitedPaths.has('/d2'));
+    assert.ok(visitedPaths.has('/d3'));
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('followLinks requires url in semantic_crawl args', async () => {
+  await assert.rejects(
+    () => callNativeTool('fetch', { followLinks: true, query: 'test', searchQuery: 'query' }),
+    /url is required|followLinks requires/,
+  );
+});
+
+// ── extractLinksFromHtml unit tests (import via native-tools internal) ──
+// We test link extraction behavior through the crawl integration tests above.
+// These tests exercise the TS regex fallback indirectly.
