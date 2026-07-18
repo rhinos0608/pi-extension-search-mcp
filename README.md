@@ -2,6 +2,25 @@
 
 Pi extension that gives your agent real-world reach — web search, page reading, GitHub, social media, video, browser automation, and desktop control. Zero-config works out of the box; API keys unlock more power.
 
+Underneath the seven tools is a small set of shared services — result fusion/ranking, layered config loading, a backend abstraction with retry and ordered fallback, and a reliability envelope around browser and desktop mutations. Each tool is a thin adapter over these services; see [Architecture](#architecture) for what's actually worth evaluating here.
+
+## Architecture
+
+### Shared services
+
+| Service | File(s) | What it does |
+|---|---|---|
+| **Fusion & ranking** | `src/fusion.ts`, `src/bm25.ts`, `src/vector-index.ts` | Reciprocal rank fusion (RRF) merges rankings from multiple search backends, or from BM25 + embedding scoring in `fetch`; URL normalization dedupes across providers before fusion. |
+| **Config loading** | `src/local-config.ts` | Merges process env, a package-local `.env` file, and an optional JSON config into one environment — process env always wins, so shell exports override everything. |
+| **Backend abstraction & fallback** | `src/backend.ts`, `src/cli-backend.ts`, `src/mcp-client.ts`, `src/retry.ts` | `SearchBackend` is one interface with two implementations (native CLI, default; legacy MCP client). `retryWithBackoff` retries only genuinely transient failures — timeouts, connection resets, 5xx — with jittered exponential backoff. |
+| **Reliability envelope — browser** | `src/browser-result.ts`, `src/session-page-state.ts`, `src/click-verification.ts`, `src/scroll-verification.ts`, `src/overlay-detection.ts` | Every result carries a structured `resultCategory`/`failureCategory`/`nextActions`; stale `@eN` refs are rejected before they reach the CLI; clicks are verified with a DOM event probe; scrolls and overlay appearances are diffed pre/post action. |
+| **Reliability envelope — desktop** | `src/desktop-contract.ts`, `src/desktop-policy.ts` | Accessibility trees are depth/node/screenshot-byte capped and redacted; mutations require a fresh `stateId` from the most recent observation and are never blindly retried after dispatch. |
+| **Output guarding** | `src/tool-output.ts` | Every tool result is truncated to a configurable character budget before it reaches the model, with head/tail preservation and a truncation marker. |
+
+### Thin adapters (the seven tools)
+
+Each public tool validates input, calls into the shared services above, and shapes the result for the model — `src/native-tools.ts` (`web_search`/`fetch`), `src/github.ts`, `src/reach-tools.ts` (`social`/`media`), `src/browser-tools.ts` + `src/agent-browser.ts` (`browser`), `src/desktop-tools.ts` (`desktop`). Adding a search provider or social platform is a fetch call plus a descriptor entry, not a new pipeline.
+
 ## What you get
 
 | Tool | What it does |
@@ -16,22 +35,25 @@ Pi extension that gives your agent real-world reach — web search, page reading
 
 ## Quick start
 
+Two ways to bring Pi-Atlas into `pi`:
+
+### Install as a Pi package (recommended)
+
 ```bash
+pi install git:github.com/rhinos0608/pi-extension-search-mcp
+```
+
+This clones the repo into `~/.pi/agent/git/` (or `.pi/git/` with `-l` for a project-local install), runs `npm install`, and registers the extension in settings for you. To try it for one session without installing anything: `pi -e git:github.com/rhinos0608/pi-extension-search-mcp`. See `pi`'s [package docs](https://github.com/earendil-works/pi) for update/remove commands.
+
+### Clone and wire up manually
+
+```bash
+git clone https://github.com/rhinos0608/pi-extension-search-mcp.git Pi-Atlas
 cd Pi-Atlas
 npm install
 ```
 
-Requires Node.js ≥ 24. On install, `npm install` automatically downloads the `agent-browser` native binary (~86 MB). This is a one-time operation.
-
-If the download is slow or fails:
-- Check network/proxy settings: `npm config get proxy`, `npm config get https-proxy`
-- Verify internet connectivity to GitHub (where binaries are hosted)
-- Use `npm install --verbose` to see download progress
-- If stuck, try clearing npm cache: `npm cache clean --force && npm install`
-
-Once installed, browser automation is ready with zero additional setup.
-
-Add to your Pi config:
+Add it to `~/.pi/agent/settings.json` (or `.pi/settings.json` for a project-local extension):
 
 ```json
 {
@@ -41,11 +63,29 @@ Add to your Pi config:
 }
 ```
 
-Or run directly:
+Or run it directly for a quick test:
 
 ```bash
 pi -e ./src/index.ts
 ```
+
+### About that `npm install`
+
+Requires Node.js ≥ 24. `web_search`, `fetch`, `github`, `social`, and `media` have no native dependency — `npm install` (or `npm install --omit=optional`) is enough to use them. `browser` is the one tool backed by a native binary: `agent-browser` (~86 MB) is an **optional** npm dependency, so `npm install` downloads it by default, but nothing else in the package needs it. Skip it with:
+
+```bash
+npm install --omit=optional
+```
+
+Skipping it leaves the other six tools unaffected; `browser` calls fail with a clear `agent-browser executable not found` error until a binary is available — see [Browser automation](#browser-automation) to install it separately or point at an existing one.
+
+`desktop` is separate again: it drives a native Cua Driver binary that was never an npm dependency at all, downloaded and put on `$PATH` by hand. It stays disabled (`PI_SEARCH_DESKTOP_AUTOMATION` unset) no matter how you installed Pi-Atlas — see [Desktop automation](#desktop-automation).
+
+If the agent-browser download is slow or fails:
+- Check network/proxy settings: `npm config get proxy`, `npm config get https-proxy`
+- Verify internet connectivity to GitHub (where binaries are hosted)
+- Use `npm install --verbose` to see download progress
+- If stuck, try clearing npm cache: `npm cache clean --force && npm install`
 
 That's it — web search works immediately via DuckDuckGo with zero configuration.
 
@@ -231,14 +271,22 @@ User-facing setup and status commands (not LLM tools):
 
 ### Installation
 
-Agent-browser is installed automatically as an npm dependency. On first `npm install`, the native browser binary downloads (~86 MB). This is a one-time operation:
+`agent-browser` is an **optional** npm dependency (`optionalDependencies` in `package.json`), not required by any other tool. By default `npm install` downloads the native binary (~86 MB) alongside everything else, so `browser` works immediately with no extra setup:
 
 ```bash
 npm install
-# Browser binary downloads automatically
+# agent-browser binary downloads automatically
 ```
 
-No additional setup required — the tool works immediately.
+If you installed with `npm install --omit=optional`, or the optional install failed for your platform, `browser` still registers as a tool but every call returns a clear `agent-browser executable not found` error. Fix it with any of:
+
+```bash
+npm install agent-browser         # install just the optional dependency
+npm install -g agent-browser      # or use a system-wide install already on PATH
+export BROWSER_EXECUTABLE_PATH="/path/to/agent-browser"  # or point at a specific binary
+```
+
+Resolution order: `BROWSER_EXECUTABLE_PATH` if set (exact path, no fallback) → otherwise `node_modules/.bin/agent-browser` → `node_modules/agent-browser/bin/agent-browser.js` → first `agent-browser` found on `PATH`.
 
 ### Capability matrix
 
